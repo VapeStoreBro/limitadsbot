@@ -205,6 +205,11 @@ async def audit_advertising_prefixes(session: AsyncSession, bot: Bot) -> None:
         active_by_user.setdefault(order.user_id, []).append(order)
 
     try:
+        me = await bot.get_me()
+        bot_id = me.id
+    except Exception:
+        bot_id = None
+    try:
         administrators = await bot.get_chat_administrators(bazaar_chat_id)
     except Exception:
         administrators = []
@@ -220,6 +225,8 @@ async def audit_advertising_prefixes(session: AsyncSession, bot: Bot) -> None:
     active_ids = set(active_by_user)
     for member in administrators:
         user_id = member.user.id
+        if user_id == bot_id:
+            continue
         title = getattr(member, "custom_title", None) or ""
         if user_id not in active_ids and title.startswith("Реклама до"):
             await refresh_user_prefix(session, bot, user_id)
