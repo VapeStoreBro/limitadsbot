@@ -21,6 +21,7 @@ from app.services.telegram_ads import publish_best_copy
 from app.services.ui_screen import send_ephemeral_notice
 
 logger = logging.getLogger(__name__)
+FINAL_PAYMENT_WINDOW = timedelta(hours=24)
 
 
 class OrderScheduler:
@@ -98,21 +99,55 @@ class OrderScheduler:
                     continue
 
                 offer = await session.get(BookingOffer, order.id)
-                if offer and offer.expires_at > now:
-                    continue
 
-                if order.paid_rub < order.price_rub and order.remaining_due_at:
-                    remaining = order.remaining_due_at - now
-                    if remaining <= timedelta(0):
-                        await complete_order(session, self.bot, order, cancelled=True)
+                # Remove deadlines created by the old rule. A deposit alone must
+                # never start the 24-hour countdown.
+                if (
+                    not offer
+                    and order.paid_rub < order.price_rub
+                    and order.requested_start_at
+                    and order.requested_start_at > now
+                    and order.remaining_due_at is not None
+                ):
+                    order.remaining_due_at = None
+                    order.payment_reminder_sent = False
+                    order.updated_at = now
+                    await session.commit()
+                    await update_buyer_card(session, self.bot, order)
+
+                if order.requested_start_at and order.requested_start_at <= now:
+                    if order.paid_rub >= order.price_rub:
+                        order.status = OrderStatus.READY.value
+                        order.updated_at = now
+                        await session.commit()
+                        await auto_activate_paid_order(session, self.bot, order)
+                        continue
+
+                    if not offer:
+                        expires = now + FINAL_PAYMENT_WINDOW
+                        offer = BookingOffer(
+                            order_id=order.id,
+                            offered_at=now,
+                            expires_at=expires,
+                        )
+                        session.add(offer)
+                        order.remaining_due_at = expires
+                        order.payment_reminder_sent = False
+                        order.updated_at = now
+                        await session.commit()
+                        await update_buyer_card(session, self.bot, order)
                         await send_ephemeral_notice(
                             self.bot,
                             order.user_id,
-                            f"<b>⌛ Бронь №{order.id} отменена</b>\n\n"
-                            "Остаток не был внесён в течение 24 часов.",
+                            f"<b>💳 Место по брони №{order.id} готово</b>\n\n"
+                            "Теперь начался срок на внесение остатка: <b>24 часа</b>. "
+                            "Кнопка оплаты находится в карточке заказа.",
                             seconds=30,
                         )
-                        continue
+
+                deadline = offer.expires_at if offer else order.remaining_due_at
+                if order.paid_rub < order.price_rub and deadline:
+                    remaining = deadline - now
                     if remaining <= timedelta(hours=3) and not order.payment_reminder_sent:
                         order.payment_reminder_sent = True
                         order.updated_at = now
@@ -125,15 +160,6 @@ class OrderScheduler:
                             "Доплатите остаток кнопкой в карточке заказа.",
                             seconds=30,
                         )
-
-                if order.requested_start_at and order.requested_start_at <= now:
-                    if order.paid_rub >= order.price_rub:
-                        order.status = OrderStatus.READY.value
-                        order.updated_at = now
-                        await session.commit()
-                        await auto_activate_paid_order(session, self.bot, order)
-                    else:
-                        await complete_order(session, self.bot, order, cancelled=True)
 
             await promote_waiting_bookings(session, self.bot)
 
