@@ -34,12 +34,12 @@ settings = get_settings()
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Focused routers run before legacy compatibility handlers. Navigation clears
-# abandoned states, buyer controls manage Middle pins, and client blocking is
-# enforced before active-ad administration.
+# Guards run before order/payment handlers so a blocked customer cannot finish
+# an old flow, pay a cancelled order or activate an already paid placement.
 dp.include_routers(
     entry_v3.router,
     common.router,
+    client_controls_v4.router,
     order_selection_v2.router,
     order_flow_v2.router,
     best_buttons_v3.router,
@@ -48,7 +48,6 @@ dp.include_routers(
     moderation.router,
     order_admin_v2.router,
     admin_pages_v4.router,
-    client_controls_v4.router,
     admin_panel_v3.router,
     customer.router,
     admin.router,
