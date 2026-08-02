@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from html import escape
-from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
@@ -14,15 +13,13 @@ from app.config import get_settings
 from app.db.session import SessionFactory
 from app.enums import TariffCode
 from app.keyboards import DURATION_NAMES, TARIFF_NAMES, preview_keyboard
+from app.keyboards_v3 import home_keyboard, upload_navigation_keyboard
 from app.models import User
 from app.rules import validate_post
 from app.services.media_groups import MediaGroupCollector
 from app.services.orders import create_order, slot_available
-from app.services.staff_delivery import (
-    deliver_order_to_staff,
-    notify_delivery_failure,
-    send_ad_content_resilient,
-)
+from app.services.preview import send_order_preview
+from app.services.staff_delivery import deliver_order_to_staff, notify_delivery_failure
 from app.states import OrderFlow
 
 logger = logging.getLogger(__name__)
@@ -32,7 +29,11 @@ settings = get_settings()
 
 
 def upload_instructions(tariff: str, booked: bool = False) -> str:
-    header = "📅 <b><u>ШАГ 3 · МАТЕРИАЛ ДЛЯ БРОНИ</u></b>" if booked else "📝 <b><u>ШАГ 3 · РЕКЛАМНЫЙ ПОСТ</u></b>"
+    header = (
+        "📅 <b><u>ШАГ 3 · МАТЕРИАЛ ДЛЯ БРОНИ</u></b>"
+        if booked
+        else "📝 <b><u>ШАГ 3 · РЕКЛАМНЫЙ ПОСТ</u></b>"
+    )
     restrictions = {
         TariffCode.STANDARD.value: (
             "• текст или до 8 фотографий\n"
@@ -56,7 +57,7 @@ def upload_instructions(tariff: str, booked: bool = False) -> str:
         "покажет предпросмотр и только после вашего подтверждения передаст его администрации.\n\n"
         f"<b>Разрешено:</b>\n{restrictions}\n\n"
         "<b>Не принимаются:</b> видео, GIF, документы, голосовые и стикеры.\n\n"
-        "<i>Можно отправить обычный текст без фотографии — он тоже должен приниматься.</i>"
+        "<i>Обычный текст без фотографии тоже принимается.</i>"
     )
 
 
@@ -78,7 +79,8 @@ async def show_processing_error(message: Message, error: Exception) -> None:
     await message.answer(
         "<b>⚠️ Не удалось обработать пост</b>\n\n"
         f"Причина: <code>{escape(type(error).__name__)}: {escape(str(error))}</code>\n\n"
-        "Попробуйте отправить пост ещё раз. Ошибка также передана владельцу."
+        "Исправьте материал или отправьте его ещё раз.",
+        reply_markup=upload_navigation_keyboard(),
     )
     try:
         await message.bot.send_message(
@@ -102,7 +104,7 @@ async def continue_order_v2(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(OrderFlow.waiting_post)
     await callback.message.edit_caption(
         caption=upload_instructions(tariff),
-        reply_markup=None,
+        reply_markup=upload_navigation_keyboard(),
     )
     await callback.answer("Жду ваш пост")
 
@@ -120,7 +122,7 @@ async def confirm_booking_v2(callback: CallbackQuery, state: FSMContext) -> None
     await state.set_state(OrderFlow.waiting_post)
     await callback.message.edit_caption(
         caption=upload_instructions(tariff, booked=True),
-        reply_markup=None,
+        reply_markup=upload_navigation_keyboard(),
     )
     await callback.answer("Место выбрано")
 
@@ -132,7 +134,8 @@ async def process_post_v2(messages: list[Message], state: FSMContext, bot: Bot) 
         tariff = data.get("tariff_code")
         if not tariff:
             await first.answer(
-                "<b>Оформление устарело</b>\nНажмите /start и начните покупку заново."
+                "<b>Оформление устарело</b>\n\nВернитесь в главное меню.",
+                reply_markup=home_keyboard(),
             )
             await state.clear()
             return
@@ -153,7 +156,8 @@ async def process_post_v2(messages: list[Message], state: FSMContext, bot: Bot) 
             await first.answer(
                 "<b>❌ Такой формат не подходит</b>\n\n"
                 "Отправьте обычный текст, одну фотографию или фотоальбом до 8 снимков. "
-                "Видео, GIF, документы, голосовые и стикеры не принимаются."
+                "Видео, GIF, документы, голосовые и стикеры не принимаются.",
+                reply_markup=upload_navigation_keyboard(),
             )
             return
 
@@ -166,7 +170,8 @@ async def process_post_v2(messages: list[Message], state: FSMContext, bot: Bot) 
             await first.answer(
                 "<b>❌ Пост не подходит для Standard</b>\n\n"
                 "В тексте найдена активная ссылка или номер телефона. Удалите их и отправьте пост заново. "
-                "Обычный @username разрешён."
+                "Обычный @username разрешён.",
+                reply_markup=upload_navigation_keyboard(),
             )
             return
 
@@ -175,7 +180,8 @@ async def process_post_v2(messages: list[Message], state: FSMContext, bot: Bot) 
             await first.answer(
                 "<b>❌ Пост не прошёл проверку</b>\n\n"
                 f"Причина: <b>{escape(result.error or 'неизвестная ошибка')}</b>\n\n"
-                "Исправьте пост и отправьте его ещё раз."
+                "Исправьте пост и отправьте его ещё раз.",
+                reply_markup=upload_navigation_keyboard(),
             )
             return
 
@@ -187,10 +193,7 @@ async def process_post_v2(messages: list[Message], state: FSMContext, bot: Bot) 
             waiting_button=False,
             submitting=False,
         )
-        await first.answer(
-            "<b>✅ Пост принят</b>\n"
-            "Сейчас подготовлю точный предпросмотр."
-        )
+        await first.answer("<b>✅ Пост принят</b>\nСейчас подготовлю предпросмотр.")
 
         if tariff == TariffCode.BEST.value:
             await state.set_state(OrderFlow.adding_buttons)
@@ -198,8 +201,8 @@ async def process_post_v2(messages: list[Message], state: FSMContext, bot: Bot) 
 
             await first.answer(
                 "🔗 <b><u>ШАГ 4 · КНОПКИ</u></b>\n\n"
-                "Можно добавить до <b>2 кнопок</b>: например, контакт продавца и ссылку на канал, бот или барахолку.\n\n"
-                "Кнопки необязательны — можно сразу перейти к предпросмотру.",
+                "Можно добавить контакт и ссылку на ресурс. Названия кнопок бот поставит сам.\n\n"
+                "Кнопки необязательны — можно сразу открыть предпросмотр.",
                 reply_markup=best_setup_keyboard(0),
             )
             return
@@ -219,14 +222,15 @@ async def receive_post_v2(message: Message, state: FSMContext, bot: Bot) -> None
 
 async def show_preview_v2(message: Message, state: FSMContext, bot: Bot) -> None:
     data = await state.get_data()
-    preview = SimpleNamespace(
+    await state.set_state(OrderFlow.previewing)
+    await message.answer("👁 <b><u>ШАГ 4 · ПРЕДПРОСМОТР</u></b>")
+    await send_order_preview(
+        bot,
+        message.chat.id,
         content_text=data.get("content_text", ""),
         media=data.get("media", []),
         buttons=data.get("buttons", []),
     )
-    await state.set_state(OrderFlow.previewing)
-    await message.answer("👁 <b><u>ШАГ 4 · ПРЕДПРОСМОТР</u></b>")
-    await send_ad_content_resilient(bot, message.chat.id, preview)
 
     booking_line = ""
     if data.get("requested_start_at"):
@@ -241,8 +245,7 @@ async def show_preview_v2(message: Message, state: FSMContext, bot: Bot) -> None
         f"├ Срок: <b>{DURATION_NAMES[data['duration_code']]}</b>\n"
         f"├ Стоимость: <b>{data['price_rub']} ₽</b>{booking_line}\n"
         f"└ Фотографий: <b>{len(data.get('media', []))}</b>\n\n"
-        "Нажмите зелёную кнопку, чтобы передать пост администрации. "
-        "До нажатия заявка никуда не отправляется.",
+        "Все фотографии выше показаны одним альбомом. Нажмите зелёную кнопку, чтобы передать пост администрации.",
         reply_markup=preview_keyboard(),
     )
 
@@ -267,7 +270,7 @@ async def redo_post_v2(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(OrderFlow.waiting_post)
     await callback.message.edit_text(
         upload_instructions(data.get("tariff_code", TariffCode.STANDARD.value)),
-        reply_markup=None,
+        reply_markup=upload_navigation_keyboard(),
     )
     await callback.answer("Отправьте новый пост")
 
@@ -298,8 +301,9 @@ async def submit_preview_v2(callback: CallbackQuery, state: FSMContext, bot: Bot
             ):
                 await state.update_data(submitting=False)
                 await callback.message.answer(
-                    "<b>⚠️ Это место только что заняли</b>\n"
-                    "Вернитесь в главное меню и выберите новое свободное время."
+                    "<b>⚠️ Это место только что заняли</b>\n\n"
+                    "Вернитесь в главное меню и выберите новое свободное время.",
+                    reply_markup=home_keyboard(),
                 )
                 return
 
@@ -335,23 +339,21 @@ async def submit_preview_v2(callback: CallbackQuery, state: FSMContext, bot: Bot
             await notify_delivery_failure(bot, order.id, error)
 
         await state.clear()
+        result_text = (
+            f"<b>✅ Заявка №{order.id} отправлена на модерацию</b>\n\n"
+            "Администрация проверит пост и пришлёт решение сюда."
+            if delivered
+            else
+            f"<b>✅ Заявка №{order.id} сохранена</b>\n\n"
+            "Группа модерации временно не приняла сообщение, но заказ уже находится в админ-панели и не потерян."
+        )
         try:
-            await callback.message.edit_text(
-                (
-                    f"<b>✅ Заявка №{order.id} отправлена на модерацию</b>\n\n"
-                    "Администрация проверит пост и пришлёт решение сюда."
-                    if delivered
-                    else
-                    f"<b>✅ Заявка №{order.id} сохранена</b>\n\n"
-                    "Группа модерации временно не приняла сообщение, но заказ уже находится "
-                    "в админ-панели и не потерян. Владелец получил точную ошибку."
-                ),
-                reply_markup=None,
-            )
+            await callback.message.edit_text(result_text, reply_markup=home_keyboard())
         except Exception:
             await bot.send_message(
                 callback.from_user.id,
-                f"✅ Заявка №{order.id} сохранена и ожидает проверки.",
+                result_text,
+                reply_markup=home_keyboard(),
             )
 
         if delivery_error:
@@ -362,7 +364,8 @@ async def submit_preview_v2(callback: CallbackQuery, state: FSMContext, bot: Bot
         await callback.message.answer(
             "<b>❌ Не удалось отправить заявку</b>\n\n"
             f"Причина: <code>{escape(type(error).__name__)}: {escape(str(error))}</code>\n\n"
-            "Попробуйте нажать кнопку ещё раз. Ошибка отправлена владельцу."
+            "Попробуйте нажать кнопку ещё раз.",
+            reply_markup=preview_keyboard(),
         )
         try:
             await bot.send_message(
