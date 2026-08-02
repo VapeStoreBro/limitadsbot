@@ -9,6 +9,13 @@ class OrderFlow(StatesGroup):
     previewing = State()
 
 
+class BestEditFlow(StatesGroup):
+    waiting_text = State()
+    waiting_photo = State()
+    waiting_contact = State()
+    waiting_resource = State()
+
+
 class AdminFlow(StatesGroup):
     adding_admin = State()
     removing_admin = State()
