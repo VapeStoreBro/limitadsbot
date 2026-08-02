@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from aiohttp import web
 from aiogram import Bot
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 from app.db.session import SessionFactory
@@ -22,9 +23,12 @@ settings = get_settings()
 def _amount_minor(payment: dict) -> int:
     try:
         value = Decimal(str(payment["amount"]["value"]))
+        minor = value * 100
     except (KeyError, InvalidOperation, TypeError) as error:
         raise ValueError("Provider payment has invalid amount") from error
-    return int(value * 100)
+    if minor != minor.to_integral_value():
+        raise ValueError("Provider payment has more than two decimal places")
+    return int(minor)
 
 
 async def handle_yookassa_webhook(request: web.Request, bot: Bot) -> web.Response:
@@ -74,12 +78,16 @@ async def handle_yookassa_webhook(request: web.Request, bot: Bot) -> web.Respons
             error_text=None,
         )
         session.add(event)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            return web.json_response({"ok": True, "duplicate": True})
 
         transaction = await session.scalar(
-            select(PaymentTransaction).where(
-                PaymentTransaction.transaction_id == transaction_id
-            )
+            select(PaymentTransaction)
+            .where(PaymentTransaction.transaction_id == transaction_id)
+            .with_for_update()
         )
         if not transaction or transaction.provider != provider.name:
             event.status = "ignored"
@@ -88,9 +96,13 @@ async def handle_yookassa_webhook(request: web.Request, bot: Bot) -> web.Respons
             await session.commit()
             return web.json_response({"ok": True, "ignored": True})
 
+        try:
+            amount_minor = _amount_minor(payment)
+        except ValueError:
+            amount_minor = -1
         valid = (
             transaction.provider_payment_id in {None, provider_payment_id}
-            and transaction.amount_minor == _amount_minor(payment)
+            and transaction.amount_minor == amount_minor
             and transaction.currency == str(payment.get("amount", {}).get("currency") or "")
             and str(metadata.get("order_id") or "") == str(transaction.order_id)
             and str(metadata.get("user_id") or "") == str(transaction.user_id)
