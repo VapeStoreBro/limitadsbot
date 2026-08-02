@@ -18,6 +18,11 @@ MEMBER_STATUSES = {
 }
 
 
+def _status_value(raw_status: object) -> str:
+    value = getattr(raw_status, "value", raw_status)
+    return str(value)
+
+
 async def inspect_membership(bot: Bot, user_id: int) -> tuple[str, str, str | None]:
     """Return (result, Telegram status, error).
 
@@ -26,7 +31,7 @@ async def inspect_membership(bot: Bot, user_id: int) -> tuple[str, str, str | No
     settings = get_settings()
     try:
         member = await bot.get_chat_member(settings.bazaar_chat_id, user_id)
-        status = str(member.status)
+        status = _status_value(member.status)
         if status in MEMBER_STATUSES:
             return "member", status, None
         if status == ChatMemberStatus.RESTRICTED.value:
