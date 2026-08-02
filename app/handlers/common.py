@@ -4,18 +4,17 @@ from html import escape
 from aiogram import Bot, F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, Message
 
-from app.config import get_settings
 from app.db.session import SessionFactory
 from app.keyboards import membership_keyboard, phone_keyboard, profile_keyboard
 from app.models import User
+from app.services.app_settings import get_bazaar_url
 from app.services.blocking import get_user_block
 from app.services.ui_screen import delete_user_input, render_user_screen
 from app.services.users import inspect_membership, is_admin, upsert_user
 
 router = Router(name="common")
-settings = get_settings()
 
 
 def profile_caption(user: User, blocked_reason: str | None = None) -> str:
@@ -34,7 +33,7 @@ def profile_caption(user: User, blocked_reason: str | None = None) -> str:
         f"ID: <code>{user.id}</code>\n"
         f"Телефон: <code>{phone}</code>\n"
         f"{access_line}\n\n"
-        "<i>Все разделы открываются в этом сообщении. Новые меню бот больше не создаёт.</i>"
+        "<i>Все разделы открываются в этом сообщении.</i>"
     )
 
 
@@ -73,6 +72,7 @@ async def show_access_result(
     result, status, error = await inspect_membership(bot, user.id)
     async with SessionFactory() as session:
         stored = await session.get(User, user.id)
+        bazaar_url = await get_bazaar_url(session)
         if stored:
             stored.is_bazaar_member = result == "member"
             stored.bazaar_status = status
@@ -87,9 +87,9 @@ async def show_access_result(
         await render_user_screen(
             bot,
             user.id,
-            "<b>❌ Для покупки рекламы нужно вступить в группу</b>\n\n"
+            "<b>❌ Для покупки рекламы нужно вступить в рабочую группу</b>\n\n"
             "После вступления нажмите «Проверить снова».",
-            membership_keyboard(settings.bazaar_url),
+            membership_keyboard(bazaar_url),
             source_message=source_message,
             media_key="main",
         )
@@ -98,14 +98,16 @@ async def show_access_result(
             bot,
             user.id,
             "<b>⚠️ Не удалось проверить участие</b>\n\nНажмите «Проверить снова».",
-            membership_keyboard(settings.bazaar_url),
+            membership_keyboard(bazaar_url),
             source_message=source_message,
             media_key="main",
         )
         if error:
             try:
+                from app.config import get_settings
+
                 await bot.send_message(
-                    settings.owner_id,
+                    get_settings().owner_id,
                     f"⚠️ Ошибка проверки участника <code>{user.id}</code>:\n<code>{escape(error)}</code>",
                 )
             except Exception:
