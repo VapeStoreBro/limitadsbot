@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.db.bootstrap import bootstrap_database
 from app.handlers import (
     admin,
+    admin_orders_v4,
     admin_pages_v4,
     admin_panel_v3,
     best_buttons_v3,
@@ -46,6 +47,7 @@ dp.include_routers(
     payments_v3.router,
     buyer_ads_v3.router,
     moderation.router,
+    admin_orders_v4.router,
     order_admin_v2.router,
     admin_pages_v4.router,
     admin_panel_v3.router,
