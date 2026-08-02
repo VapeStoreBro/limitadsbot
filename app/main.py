@@ -25,6 +25,7 @@ from app.handlers import (
     entry_v3,
     moderation,
     order_admin_v2,
+    order_compose_v6,
     order_flow_v2,
     order_selection_v2,
     payments_v3,
@@ -41,8 +42,8 @@ settings = get_settings()
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# The v6 routers own private navigation and admin actions first. Older routers
-# remain only for compatibility with stale Telegram buttons and old orders.
+# The v6 routers own private navigation, order composition and admin actions.
+# Older routers remain only for stale Telegram buttons and existing orders.
 dp.include_routers(
     entry_v3.router,
     common.router,
@@ -50,6 +51,7 @@ dp.include_routers(
     single_actions_v6.router,
     client_controls_v4.router,
     order_selection_v2.router,
+    order_compose_v6.router,
     submission_v5.router,
     order_flow_v2.router,
     best_edit_v5.router,
