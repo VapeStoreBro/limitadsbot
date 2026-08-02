@@ -1,21 +1,20 @@
 from datetime import datetime, timezone
 
 from aiogram import Bot, F, Router
+from aiogram.enums import ChatType
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 
-from app.config import get_settings
 from app.db.session import SessionFactory
 from app.enums import OrderStatus, TariffCode
 from app.keyboards import moderation_keyboard
 from app.keyboards_v3 import moderation_reason_keyboard
 from app.models import AdOrder, MiddlePinCandidate
 from app.models_extra import OrderDecision
-from app.services.app_settings import get_staff_chat_id
+from app.services.app_settings import get_bazaar_chat_id, get_staff_chat_id
 from app.services.order_cards import update_buyer_card, update_staff_card
 
 router = Router(name="moderation")
-settings = get_settings()
 
 REASON_TEXTS = {
     "text": "Исправьте текст рекламного поста.",
@@ -183,11 +182,14 @@ def looks_like_ad_post(message: Message) -> bool:
     return bool(message.photo or len(text) >= 30 or has_link)
 
 
-@router.message(F.chat.id == settings.bazaar_chat_id)
+@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
 async def bazaar_messages(message: Message, bot: Bot) -> None:
     if not message.from_user or not looks_like_ad_post(message):
         return
     async with SessionFactory() as session:
+        bazaar_chat_id = await get_bazaar_chat_id(session)
+        if message.chat.id != bazaar_chat_id:
+            return
         order = await session.scalar(
             select(AdOrder)
             .where(
