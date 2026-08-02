@@ -10,9 +10,9 @@ from aiohttp import web
 REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "VapeStoreBro/limitadsbot")
 WEBHOOK_SECRET = os.environ["GITHUB_WEBHOOK_SECRET"].encode()
 PATH_SECRET = os.environ["DEPLOY_PATH_SECRET"]
-PROJECT_DIR = Path(os.environ.get("PROJECT_DIR", "/opt/limitadsbot"))
+PROJECT_DIR = Path(os.environ.get("PROJECT_DIR", "/root/limitadsbot"))
 SERVICE = os.environ.get("SYSTEMD_SERVICE", "limitadsbot.service")
-HOST = os.environ.get("DEPLOY_HOST", "127.0.0.1")
+HOST = os.environ.get("DEPLOY_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DEPLOY_PORT", "9102"))
 LOCK = asyncio.Lock()
 
@@ -50,6 +50,7 @@ async def deploy(request: web.Request) -> web.Response:
             ("git", "fetch", "origin", "main"),
             ("git", "reset", "--hard", "origin/main"),
             (str(PROJECT_DIR / ".venv/bin/pip"), "install", "-r", "requirements.txt"),
+            (str(PROJECT_DIR / ".venv/bin/python"), "-m", "compileall", "-q", "app", "deploy"),
             ("systemctl", "restart", SERVICE),
         ]
         logs = []
@@ -63,7 +64,7 @@ async def deploy(request: web.Request) -> web.Response:
 
 app = web.Application(client_max_size=2 * 1024 * 1024)
 app.router.add_post(f"/deploy/{PATH_SECRET}", deploy)
-app.router.add_get("/health", lambda _: web.json_response({"ok": True}))
+app.router.add_get("/health", lambda _: web.json_response({"ok": True, "service": "limitads-deploy"}))
 
 if __name__ == "__main__":
     web.run_app(app, host=HOST, port=PORT)
