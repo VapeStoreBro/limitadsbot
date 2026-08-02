@@ -32,6 +32,8 @@ from app.handlers import (
     order_flow_v2,
     order_selection_v2,
     payment_methods_v9,
+    payment_shop_ad_v10,
+    payment_shop_disable_v10,
     payments_v3,
     revision_v9,
     single_actions_v6,
@@ -48,12 +50,14 @@ settings = get_settings()
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Final routers own payment selection, repeat moderation and one-screen navigation
-# before compatibility handlers. Old test-payment callbacks remain readable for
-# already opened messages, while new cards use Stars or manual card verification.
+# Direct entry runs first. Stars-shop settings and the advertised payment choice
+# run before their compatibility handlers, so old opened cards still work while
+# new cards use the corrected interface.
 dp.include_routers(
     entry_v3.router,
     common.router,
+    payment_shop_disable_v10.router,
+    payment_shop_ad_v10.router,
     admin_runtime_fix_v8.router,
     admin_final_v7.router,
     single_screen_v6.router,

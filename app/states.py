@@ -34,3 +34,5 @@ class AdminFlow(StatesGroup):
     entering_bazaar_url = State()
     entering_card_payment_text = State()
     entering_stars_rate = State()
+    entering_stars_shop_url = State()
+    entering_stars_shop_text = State()
