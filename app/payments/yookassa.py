@@ -21,11 +21,7 @@ class YooKassaProvider:
 
     @property
     def configured(self) -> bool:
-        return bool(
-            self.settings.yookassa_shop_id
-            and self.settings.yookassa_secret_key
-            and self.settings.yookassa_return_url
-        )
+        return self.settings.yookassa_configured
 
     async def _request(
         self,
@@ -36,7 +32,7 @@ class YooKassaProvider:
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self.configured:
-            raise YooKassaError("YooKassa credentials are not configured")
+            raise YooKassaError("YooKassa is disabled or credentials are not configured")
 
         headers = {"Content-Type": "application/json"}
         if idempotency_key:
