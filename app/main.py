@@ -12,6 +12,7 @@ from app.db.bootstrap import bootstrap_database
 from app.handlers import (
     admin,
     admin_controls_v5,
+    admin_final_v7,
     admin_orders_v4,
     admin_pages_v4,
     admin_panel_v3,
@@ -43,11 +44,12 @@ settings = get_settings()
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# The v6 routers own private navigation, order composition and admin actions.
-# Older routers remain only for stale Telegram buttons and existing orders.
+# The final router owns administrators, group settings, statistics and personal
+# pricing before compatibility handlers. Private navigation stays single-screen.
 dp.include_routers(
     entry_v3.router,
     common.router,
+    admin_final_v7.router,
     single_screen_v6.router,
     single_actions_v6.router,
     client_single_v6.router,
