@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from html import unescape
+from html import escape, unescape
 from types import SimpleNamespace
 
 from aiogram import Bot
@@ -26,13 +26,13 @@ def staff_order_text(order: AdOrder, user: User) -> str:
     full_name = " ".join(
         part for part in (user.first_name, user.last_name) if part
     ).strip() or str(user.id)
-    username = f"@{user.username}" if user.username else "не указан"
-    phone = user.phone or "не указан"
-    booking = order.requested_start_at or "нет"
+    username = f"@{escape(user.username)}" if user.username else "не указан"
+    phone = escape(user.phone or "не указан")
+    booking = escape(str(order.requested_start_at or "нет"))
     return (
         f"<b><u>🛡 НОВАЯ ЗАЯВКА №{order.id}</u></b>\n\n"
         f"<b>Покупатель</b>\n"
-        f"├ Имя: <a href=\"tg://user?id={user.id}\">{full_name}</a>\n"
+        f"├ Имя: <a href=\"tg://user?id={user.id}\">{escape(full_name)}</a>\n"
         f"├ ID: <code>{user.id}</code>\n"
         f"├ Username: {username}\n"
         f"└ Телефон: <code>{phone}</code>\n\n"
@@ -101,11 +101,12 @@ async def deliver_order_to_staff(bot: Bot, order: AdOrder, user: User) -> int:
 
 async def notify_delivery_failure(bot: Bot, order_id: int, error: Exception) -> None:
     try:
+        error_text = escape(f"{type(error).__name__}: {error}")
         await bot.send_message(
             settings.owner_id,
             (
                 f"<b>⚠️ Заявка №{order_id} сохранена, но не доставлена в группу стафа.</b>\n\n"
-                f"Ошибка: <code>{type(error).__name__}: {error}</code>\n\n"
+                f"Ошибка: <code>{error_text}</code>\n\n"
                 "Заявка доступна в админ-панели → 📥 Заявки."
             ),
         )
