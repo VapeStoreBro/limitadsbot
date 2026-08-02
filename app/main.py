@@ -11,12 +11,17 @@ from app.config import get_settings
 from app.db.bootstrap import bootstrap_database
 from app.handlers import (
     admin,
+    admin_panel_v3,
+    best_buttons_v3,
+    buyer_ads_v3,
     common,
     customer,
+    entry_v3,
     moderation,
     order_admin_v2,
     order_flow_v2,
     order_selection_v2,
+    payments_v3,
 )
 from app.services.price_card import ensure_price_card
 from app.services.scheduler import OrderScheduler
@@ -27,15 +32,21 @@ settings = get_settings()
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# The polished and fault-tolerant order routers are connected before the
-# legacy handlers so that they receive the relevant states and callbacks first.
+# New focused routers run before legacy compatibility handlers. This keeps the
+# compact buyer launcher, guided Best buttons, buyer ad controls and private
+# admin controls authoritative without breaking older orders already in DB.
 dp.include_routers(
+    entry_v3.router,
     common.router,
     order_selection_v2.router,
     order_flow_v2.router,
-    customer.router,
+    best_buttons_v3.router,
+    payments_v3.router,
+    buyer_ads_v3.router,
     moderation.router,
     order_admin_v2.router,
+    admin_panel_v3.router,
+    customer.router,
     admin.router,
 )
 
@@ -46,6 +57,10 @@ async def on_startup() -> None:
     await bootstrap_database()
     ensure_price_card()
     scheduler.start()
+    try:
+        await bot.delete_my_commands()
+    except Exception:
+        logger.exception("Could not clear bot commands")
     if settings.webhook_base_url:
         await bot.set_webhook(
             settings.webhook_url,
