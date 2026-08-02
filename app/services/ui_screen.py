@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import SessionFactory
 from app.models import UserScreen
-from app.services.price_card import ensure_main_menu_card
+from app.services.price_card import ensure_main_menu_card, ensure_price_card
 
 
 async def register_user_screen(
@@ -52,8 +52,8 @@ def _desired_media(
     if photo_file_id:
         media = photo_file_id
     else:
-        path = Path(image_path or ensure_main_menu_card())
-        media = FSInputFile(path)
+        selected = image_path or ensure_main_menu_card() or ensure_price_card()
+        media = FSInputFile(Path(selected))
     return InputMediaPhoto(media=media, caption=caption, parse_mode="HTML")
 
 
@@ -209,22 +209,13 @@ async def render_user_screen(
             photo_file_id=photo_file_id,
             caption=text,
         )
-        if isinstance(media.media, FSInputFile):
-            message = await bot.send_photo(
-                user_id,
-                media.media,
-                caption=text,
-                reply_markup=markup,
-                parse_mode="HTML",
-            )
-        else:
-            message = await bot.send_photo(
-                user_id,
-                media.media,
-                caption=text,
-                reply_markup=markup,
-                parse_mode="HTML",
-            )
+        message = await bot.send_photo(
+            user_id,
+            media.media,
+            caption=text,
+            reply_markup=markup,
+            parse_mode="HTML",
+        )
         if source_message and source_message.message_id != message.message_id:
             await _remove_old_clicked_message(bot, source_message, message.message_id)
         return await register_user_screen(
