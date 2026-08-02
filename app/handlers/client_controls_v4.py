@@ -3,6 +3,7 @@ from html import escape
 from aiogram import F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.enums import ChatType
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import func, select
 
@@ -18,6 +19,7 @@ from app.models import AdOrder, User
 from app.services.blocking import block_user, get_user_block, unblock_user
 from app.services.telegram_ads import finish_order
 from app.services.users import is_admin
+from app.states import OrderFlow
 
 router = Router(name="client_controls_v4")
 settings = get_settings()
@@ -32,6 +34,62 @@ async def require_admin(callback: CallbackQuery) -> bool:
     if not allowed:
         await callback.answer("Доступ запрещён.", show_alert=True)
     return allowed
+
+
+@router.callback_query(OrderFlow.previewing, F.data == "preview:submit")
+async def guard_blocked_submission(callback: CallbackQuery, state: FSMContext) -> None:
+    async with SessionFactory() as session:
+        block = await get_user_block(session, callback.from_user.id)
+    if not block:
+        raise SkipHandler
+    await state.clear()
+    await callback.answer("Доступ ограничен", show_alert=True)
+    await callback.bot.send_message(
+        callback.from_user.id,
+        "<b>🚫 Заявка не отправлена</b>\n\n"
+        f"Причина: <i>{escape(block.reason)}</i>",
+        reply_markup=home_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith("testpay:"))
+async def guard_blocked_payment(callback: CallbackQuery) -> None:
+    async with SessionFactory() as session:
+        block = await get_user_block(session, callback.from_user.id)
+    if not block:
+        raise SkipHandler
+    await callback.answer(
+        "Оплата недоступна: доступ клиента ограничен администрацией.",
+        show_alert=True,
+    )
+
+
+@router.callback_query(F.data.startswith("adminorder:activate:"))
+async def guard_blocked_activation(callback: CallbackQuery) -> None:
+    order_id = int(callback.data.rsplit(":", 1)[1])
+    async with SessionFactory() as session:
+        order = await session.get(AdOrder, order_id)
+        block = await get_user_block(session, order.user_id) if order else None
+        if not order or not block:
+            raise SkipHandler
+        if order.status == OrderStatus.ACTIVE.value:
+            await finish_order(
+                session,
+                callback.bot,
+                order,
+                status=OrderStatus.CANCELLED.value,
+            )
+        elif order.status not in {
+            OrderStatus.COMPLETED.value,
+            OrderStatus.CANCELLED.value,
+            OrderStatus.REJECTED.value,
+        }:
+            order.status = OrderStatus.CANCELLED.value
+            await session.commit()
+    await callback.answer(
+        "Клиент заблокирован. Заказ отменён и не может быть активирован.",
+        show_alert=True,
+    )
 
 
 @router.callback_query(F.data.startswith("adminv3:client:"))
