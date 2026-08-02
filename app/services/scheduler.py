@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 
@@ -18,6 +19,8 @@ from app.services.lifecycle import (
 from app.services.order_cards import update_buyer_card
 from app.services.telegram_ads import publish_best_copy
 from app.services.ui_screen import send_ephemeral_notice
+
+logger = logging.getLogger(__name__)
 
 
 class OrderScheduler:
@@ -42,8 +45,8 @@ class OrderScheduler:
             try:
                 await self.tick()
             except Exception:
-                pass
-            await asyncio.sleep(60)
+                logger.exception("Order scheduler tick failed")
+            await asyncio.sleep(30)
 
     async def tick(self) -> None:
         now = datetime.now(timezone.utc)
@@ -126,8 +129,6 @@ class OrderScheduler:
                     else:
                         await complete_order(session, self.bot, order, cancelled=True)
 
-            # This is cheap: two capacity checks and only booked rows. It also
-            # catches slots freed manually outside the scheduler.
             await promote_waiting_bookings(session, self.bot)
 
             if (
