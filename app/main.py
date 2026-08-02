@@ -31,6 +31,7 @@ from app.handlers import (
     order_compose_v6,
     order_flow_v2,
     order_selection_v2,
+    owner_emergency_entry,
     payment_methods_v9,
     payment_shop_ad_v10,
     payment_shop_disable_v10,
@@ -50,10 +51,10 @@ settings = get_settings()
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Direct entry runs first. Stars-shop settings and the advertised payment choice
-# run before their compatibility handlers, so old opened cards still work while
-# new cards use the corrected interface.
+# The hard-coded owner rescue router runs first and guarantees access even when
+# the branded one-screen UI or a saved screen record is broken.
 dp.include_routers(
+    owner_emergency_entry.router,
     entry_v3.router,
     common.router,
     payment_shop_disable_v10.router,
