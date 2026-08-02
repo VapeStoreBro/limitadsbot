@@ -14,6 +14,7 @@ from app.handlers import (
     admin_panel_v3,
     best_buttons_v3,
     buyer_ads_v3,
+    client_controls_v4,
     common,
     customer,
     entry_v3,
@@ -32,9 +33,9 @@ settings = get_settings()
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# New focused routers run before legacy compatibility handlers. This keeps the
-# compact buyer launcher, guided Best buttons, buyer ad controls and private
-# admin controls authoritative without breaking older orders already in DB.
+# Focused routers run before legacy compatibility handlers. Navigation clears
+# abandoned states, buyer controls manage Middle pins, and client blocking is
+# enforced before active-ad administration.
 dp.include_routers(
     entry_v3.router,
     common.router,
@@ -45,6 +46,7 @@ dp.include_routers(
     buyer_ads_v3.router,
     moderation.router,
     order_admin_v2.router,
+    client_controls_v4.router,
     admin_panel_v3.router,
     customer.router,
     admin.router,
