@@ -142,6 +142,94 @@ async def _record_publications(
         )
 
 
+async def _unpin_message(bot: Bot, chat_id: int, message_id: int | None) -> None:
+    if not message_id:
+        return
+    try:
+        await bot.unpin_chat_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
+async def suspend_best_pin_for_middle(
+    session: AsyncSession,
+    bot: Bot,
+) -> None:
+    """Make a newly confirmed Middle post the newest pin.
+
+    Middle pins remain pinned. Only the currently promoted Best pin is removed;
+    the next scheduled Best copy will become the newest pin again.
+    """
+    settings = get_settings()
+    best_orders = (
+        await session.scalars(
+            select(AdOrder).where(
+                AdOrder.tariff_code == TariffCode.BEST.value,
+                AdOrder.status == OrderStatus.ACTIVE.value,
+                AdOrder.pinned_message_id.is_not(None),
+            )
+        )
+    ).all()
+    for best in best_orders:
+        await _unpin_message(bot, settings.bazaar_chat_id, best.pinned_message_id)
+        best.pinned_message_id = None
+        best.updated_at = datetime.now(timezone.utc)
+
+
+async def pin_best_as_newest(
+    session: AsyncSession,
+    bot: Bot,
+    order: AdOrder,
+    message_id: int,
+) -> None:
+    """Keep exactly one current Best pin while preserving all Middle pins."""
+    settings = get_settings()
+    other_best = (
+        await session.scalars(
+            select(AdOrder).where(
+                AdOrder.tariff_code == TariffCode.BEST.value,
+                AdOrder.status == OrderStatus.ACTIVE.value,
+                AdOrder.pinned_message_id.is_not(None),
+            )
+        )
+    ).all()
+    for best in other_best:
+        if best.pinned_message_id != message_id:
+            await _unpin_message(bot, settings.bazaar_chat_id, best.pinned_message_id)
+        if best.id != order.id:
+            best.pinned_message_id = None
+            best.updated_at = datetime.now(timezone.utc)
+
+    await bot.pin_chat_message(
+        settings.bazaar_chat_id,
+        message_id,
+        disable_notification=True,
+    )
+    order.pinned_message_id = message_id
+    order.updated_at = datetime.now(timezone.utc)
+
+
+async def restore_order_pin(
+    session: AsyncSession,
+    bot: Bot,
+    order: AdOrder,
+) -> bool:
+    if not order.pinned_message_id:
+        return False
+    settings = get_settings()
+    await bot.pin_chat_message(
+        settings.bazaar_chat_id,
+        order.pinned_message_id,
+        disable_notification=True,
+    )
+    if order.tariff_code == TariffCode.MIDDLE.value:
+        await suspend_best_pin_for_middle(session, bot)
+    elif order.tariff_code == TariffCode.BEST.value:
+        await pin_best_as_newest(session, bot, order, order.pinned_message_id)
+    await session.commit()
+    return True
+
+
 async def activate_order(
     session: AsyncSession,
     bot: Bot,
@@ -165,13 +253,7 @@ async def activate_order(
     messages: list[Message] = []
     if order.tariff_code == TariffCode.BEST.value:
         messages = await send_ad_content(bot, settings.bazaar_chat_id, order)
-        main = messages[0]
-        await bot.pin_chat_message(
-            settings.bazaar_chat_id,
-            main.message_id,
-            disable_notification=True,
-        )
-        order.pinned_message_id = main.message_id
+        await pin_best_as_newest(session, bot, order, messages[0].message_id)
         order.next_publish_at = now + timedelta(hours=3)
         await _record_publications(session, order, messages, PublicationKind.MAIN.value)
     elif order.tariff_code == TariffCode.MIDDLE.value:
@@ -194,7 +276,7 @@ async def replace_best_publication(
     bot: Bot,
     order: AdOrder,
 ) -> None:
-    """Publish the edited Best post, pin it, then remove the previous main post."""
+    """Publish the edited Best post and promote it without touching Middle pins."""
     if order.tariff_code != TariffCode.BEST.value or order.status != OrderStatus.ACTIVE.value:
         await session.commit()
         return
@@ -216,22 +298,12 @@ async def replace_best_publication(
 
     messages = await send_ad_content(bot, settings.bazaar_chat_id, order)
     new_main = messages[0]
-    await bot.pin_chat_message(
-        settings.bazaar_chat_id,
-        new_main.message_id,
-        disable_notification=True,
-    )
+    await pin_best_as_newest(session, bot, order, new_main.message_id)
 
     for old_id in old_ids:
         if old_id == new_main.message_id:
             continue
-        try:
-            await bot.unpin_chat_message(
-                chat_id=settings.bazaar_chat_id,
-                message_id=old_id,
-            )
-        except Exception:
-            pass
+        await _unpin_message(bot, settings.bazaar_chat_id, old_id)
         try:
             await bot.delete_message(settings.bazaar_chat_id, old_id)
         except Exception:
@@ -240,7 +312,6 @@ async def replace_best_publication(
     for publication in old_main:
         publication.deleted_at = now
     await _record_publications(session, order, messages, PublicationKind.MAIN.value)
-    order.pinned_message_id = new_main.message_id
     order.updated_at = now
     await session.commit()
 
@@ -255,12 +326,6 @@ async def confirm_middle_pin(
     new_message_id = candidate.message_id
     replacing_existing = bool(order.pinned_message_id)
 
-    await bot.pin_chat_message(
-        chat_id=settings.bazaar_chat_id,
-        message_id=new_message_id,
-        disable_notification=True,
-    )
-
     previous = (
         await session.scalars(
             select(Publication).where(
@@ -274,6 +339,12 @@ async def confirm_middle_pin(
     if order.pinned_message_id:
         old_ids.add(order.pinned_message_id)
 
+    await bot.pin_chat_message(
+        chat_id=settings.bazaar_chat_id,
+        message_id=new_message_id,
+        disable_notification=True,
+    )
+
     for old_id in old_ids:
         if old_id == new_message_id:
             continue
@@ -286,6 +357,10 @@ async def confirm_middle_pin(
                 break
             except Exception:
                 await asyncio.sleep(0.2)
+
+    # A newly confirmed Middle must be the newest visible pin. The Best post is
+    # not deleted; it will regain the top position on its next 3-hour publish.
+    await suspend_best_pin_for_middle(session, bot)
 
     now = datetime.now(timezone.utc)
     for publication in previous:
@@ -335,14 +410,7 @@ async def finish_order(
     status: str = OrderStatus.COMPLETED.value,
 ) -> None:
     settings = get_settings()
-    if order.pinned_message_id:
-        try:
-            await bot.unpin_chat_message(
-                chat_id=settings.bazaar_chat_id,
-                message_id=order.pinned_message_id,
-            )
-        except Exception:
-            pass
+    await _unpin_message(bot, settings.bazaar_chat_id, order.pinned_message_id)
     candidate = await session.get(MiddlePinCandidate, order.id)
     if candidate:
         await session.delete(candidate)
@@ -364,6 +432,10 @@ async def publish_best_copy(
     now = datetime.now(timezone.utc)
     messages = await send_ad_content(bot, settings.bazaar_chat_id, order)
     await _record_publications(session, order, messages, PublicationKind.COPY.value)
+
+    # Every scheduled Best copy becomes the newest/top pin. Existing Middle
+    # pins stay pinned; only the previous Best pin is removed.
+    await pin_best_as_newest(session, bot, order, messages[0].message_id)
     order.next_publish_at = now + timedelta(hours=3)
     await session.flush()
 
@@ -391,6 +463,8 @@ async def publish_best_copy(
 
     for old_group in grouped[3:]:
         for publication in old_group:
+            if publication.message_id == order.pinned_message_id:
+                continue
             try:
                 await bot.delete_message(publication.chat_id, publication.message_id)
             except Exception:
