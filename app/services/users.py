@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 
 from aiogram import Bot
@@ -8,26 +9,45 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models import Admin, User
 
+logger = logging.getLogger(__name__)
+
 MEMBER_STATUSES = {
-    ChatMemberStatus.CREATOR,
-    ChatMemberStatus.ADMINISTRATOR,
-    ChatMemberStatus.MEMBER,
-    ChatMemberStatus.RESTRICTED,
+    ChatMemberStatus.CREATOR.value,
+    ChatMemberStatus.ADMINISTRATOR.value,
+    ChatMemberStatus.MEMBER.value,
 }
 
 
-async def inspect_membership(bot: Bot, user_id: int) -> tuple[bool, str]:
+async def inspect_membership(bot: Bot, user_id: int) -> tuple[str, str, str | None]:
+    """Return (result, Telegram status, error).
+
+    result is one of: member, not_member, unknown.
+    """
     settings = get_settings()
     try:
         member = await bot.get_chat_member(settings.bazaar_chat_id, user_id)
-        return member.status in MEMBER_STATUSES, member.status.value
-    except Exception:
-        return False, "unknown"
+        status = str(member.status)
+        if status in MEMBER_STATUSES:
+            return "member", status, None
+        if status == ChatMemberStatus.RESTRICTED.value:
+            is_member = bool(getattr(member, "is_member", False))
+            return ("member" if is_member else "not_member"), status, None
+        if status in {ChatMemberStatus.LEFT.value, ChatMemberStatus.KICKED.value}:
+            return "not_member", status, None
+        return "unknown", status, f"unexpected membership status: {status}"
+    except Exception as error:
+        logger.exception(
+            "Unable to inspect membership for user %s in chat %s",
+            user_id,
+            settings.bazaar_chat_id,
+        )
+        return "unknown", "unknown", f"{type(error).__name__}: {error}"
 
 
 async def upsert_user(session: AsyncSession, bot: Bot, tg_user: TelegramUser) -> User:
     now = datetime.now(timezone.utc)
-    is_member, status = await inspect_membership(bot, tg_user.id)
+    membership, status, _ = await inspect_membership(bot, tg_user.id)
+    is_member = membership == "member"
     user = await session.get(User, tg_user.id)
     if user is None:
         history = [tg_user.username] if tg_user.username else []
@@ -64,4 +84,7 @@ async def upsert_user(session: AsyncSession, bot: Bot, tg_user: TelegramUser) ->
 
 
 async def is_admin(session: AsyncSession, user_id: int) -> bool:
+    settings = get_settings()
+    if user_id == settings.owner_id:
+        return True
     return await session.get(Admin, user_id) is not None
