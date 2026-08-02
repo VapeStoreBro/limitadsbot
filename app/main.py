@@ -10,6 +10,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from app.config import get_settings
 from app.db.bootstrap import bootstrap_database
 from app.handlers import admin, common, customer, moderation
+from app.services.price_card import ensure_price_card
 from app.services.scheduler import OrderScheduler
 
 logging.basicConfig(level=logging.INFO)
@@ -23,6 +24,7 @@ scheduler = OrderScheduler(bot)
 
 async def on_startup() -> None:
     await bootstrap_database()
+    ensure_price_card()
     scheduler.start()
     if settings.webhook_base_url:
         await bot.set_webhook(
