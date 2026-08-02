@@ -27,6 +27,7 @@ cat > .env <<EOF
 BOT_TOKEN=$BOT_TOKEN
 OWNER_ID=6577441312
 BAZAAR_CHAT_ID=-1003377593526
+BAZAAR_URL=https://t.me/bgghtrhrwbehtvrw
 STAFF_CHAT_ID=-5466156820
 TIMEZONE=Europe/Moscow
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
@@ -46,7 +47,6 @@ SYSTEMD_SERVICE=limitadsbot.service
 EOF
 chmod 600 .env
 
-# Start the isolated PostgreSQL container and wait until it is ready.
 docker compose up -d postgres
 for attempt in {1..30}; do
   if docker compose exec -T postgres pg_isready -U limitads -d limitads >/dev/null 2>&1; then
