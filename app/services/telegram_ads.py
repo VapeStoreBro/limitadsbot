@@ -17,8 +17,8 @@ async def send_ad_content(bot: Bot, chat_id: int, order: AdOrder) -> list[Messag
 
     When Best contains several photos and buttons, the first photo becomes the
     main post: it contains the complete caption and inline buttons. The other
-    photos follow as an album. This lets Telegram pin the actual advertising
-    post with its buttons instead of a separate technical message.
+    photos follow after it. This lets Telegram pin the actual advertising post
+    with its buttons instead of a separate technical message.
     """
     keyboard = best_buttons(order.buttons)
     media = list(order.media or [])
@@ -53,11 +53,16 @@ async def send_ad_content(bot: Bot, chat_id: int, order: AdOrder) -> list[Messag
             reply_markup=keyboard,
             parse_mode="HTML",
         )
-        remaining = [
-            InputMediaPhoto(media=item["file_id"])
-            for item in media[1:]
-        ]
-        extras = list(await bot.send_media_group(chat_id, media=remaining)) if remaining else []
+        remaining = media[1:]
+        if len(remaining) == 1:
+            extras = [await bot.send_photo(chat_id, remaining[0]["file_id"])]
+        else:
+            extras = list(
+                await bot.send_media_group(
+                    chat_id,
+                    media=[InputMediaPhoto(media=item["file_id"]) for item in remaining],
+                )
+            )
         return [main, *extras]
 
     album = [
