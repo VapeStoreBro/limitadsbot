@@ -9,7 +9,14 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 
 from app.config import get_settings
 from app.db.bootstrap import bootstrap_database
-from app.handlers import admin, common, customer, moderation
+from app.handlers import (
+    admin,
+    common,
+    customer,
+    moderation,
+    order_admin_v2,
+    order_flow_v2,
+)
 from app.services.price_card import ensure_price_card
 from app.services.scheduler import OrderScheduler
 
@@ -18,7 +25,19 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
-dp.include_routers(common.router, customer.router, moderation.router, admin.router)
+
+# New reliable handlers are connected before the legacy modules so that
+# text-only posts, moderation delivery, and actionable admin cards cannot be
+# intercepted by the older placeholder flow.
+dp.include_routers(
+    common.router,
+    order_flow_v2.router,
+    customer.router,
+    moderation.router,
+    order_admin_v2.router,
+    admin.router,
+)
+
 scheduler = OrderScheduler(bot)
 
 
