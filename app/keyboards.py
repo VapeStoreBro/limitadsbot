@@ -32,21 +32,34 @@ def phone_keyboard() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
+        is_persistent=False,
         input_field_placeholder="Нажмите кнопку ниже",
     )
 
 
-def profile_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
-    rows = [
-        [
-            InlineKeyboardButton(
-                text="📢 Разместить рекламу",
-                callback_data="profile:buy",
-                style="success",
-            )
-        ],
-        [InlineKeyboardButton(text="📂 Мои рекламы", callback_data="profile:orders")],
-    ]
+def profile_keyboard(is_admin: bool = False, blocked: bool = False) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if not blocked:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="📢 Разместить рекламу",
+                    callback_data="profile:buy",
+                    style="success",
+                )
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🚫 Покупка рекламы недоступна",
+                    callback_data="blocked:info",
+                    style="danger",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="📂 Мои рекламы", callback_data="profile:orders")])
     if is_admin:
         rows.append(
             [
@@ -85,6 +98,8 @@ def admin_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="⬅️ Профиль")],
         ],
         resize_keyboard=True,
+        one_time_keyboard=True,
+        is_persistent=False,
         input_field_placeholder="Админ-панель",
     )
 
@@ -119,7 +134,15 @@ def tariff_selection_keyboard(
                     )
                 ]
             )
-    rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="order:cancel", style="danger")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🏠 Отменить и в меню",
+                callback_data="nav:home",
+                style="danger",
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -134,7 +157,13 @@ def order_confirmation_keyboard() -> InlineKeyboardMarkup:
                 )
             ],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="order:back_tariffs")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="order:cancel", style="danger")],
+            [
+                InlineKeyboardButton(
+                    text="🏠 Отменить и в меню",
+                    callback_data="nav:home",
+                    style="danger",
+                )
+            ],
         ]
     )
 
@@ -150,7 +179,13 @@ def booking_offer_keyboard(start_timestamp: int) -> InlineKeyboardMarkup:
                 )
             ],
             [InlineKeyboardButton(text="⬅️ Другой тариф", callback_data="order:back_tariffs")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="order:cancel", style="danger")],
+            [
+                InlineKeyboardButton(
+                    text="🏠 Отменить и в меню",
+                    callback_data="nav:home",
+                    style="danger",
+                )
+            ],
         ]
     )
 
@@ -172,7 +207,13 @@ def preview_keyboard() -> InlineKeyboardMarkup:
                 )
             ],
             [InlineKeyboardButton(text="✏️ Загрузить пост заново", callback_data="preview:redo")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="order:cancel", style="danger")],
+            [
+                InlineKeyboardButton(
+                    text="🏠 Отменить и в меню",
+                    callback_data="nav:home",
+                    style="danger",
+                )
+            ],
         ]
     )
 
@@ -236,7 +277,8 @@ def admin_management_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="➕ Добавить", callback_data="admin:add", style="success"),
                 InlineKeyboardButton(text="➖ Удалить", callback_data="admin:remove", style="danger"),
-            ]
+            ],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")],
         ]
     )
 
