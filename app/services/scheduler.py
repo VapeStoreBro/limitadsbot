@@ -7,7 +7,8 @@ from sqlalchemy import select
 
 from app.db.session import SessionFactory
 from app.enums import OrderStatus, TariffCode
-from app.models import AdOrder, UserBlock
+from app.models import AdOrder, BookingOffer, UserBlock
+from app.services.booking_queue import expire_booking_offers, promote_waiting_bookings
 from app.services.lifecycle import (
     audit_advertising_prefixes,
     auto_activate_paid_order,
@@ -16,6 +17,7 @@ from app.services.lifecycle import (
 )
 from app.services.order_cards import update_buyer_card
 from app.services.telegram_ads import publish_best_copy
+from app.services.ui_screen import send_ephemeral_notice
 
 
 class OrderScheduler:
@@ -46,6 +48,8 @@ class OrderScheduler:
     async def tick(self) -> None:
         now = datetime.now(timezone.utc)
         async with SessionFactory() as session:
+            await expire_booking_offers(session, self.bot)
+
             ready = (
                 await session.scalars(
                     select(AdOrder).where(
@@ -80,28 +84,38 @@ class OrderScheduler:
 
             booked = (
                 await session.scalars(
-                    select(AdOrder).where(OrderStatus.BOOKED.value == AdOrder.status)
+                    select(AdOrder)
+                    .where(AdOrder.status == OrderStatus.BOOKED.value)
+                    .order_by(AdOrder.requested_start_at, AdOrder.created_at)
                 )
             ).all()
             for order in booked:
                 if await session.get(UserBlock, order.user_id):
                     await complete_order(session, self.bot, order, cancelled=True)
                     continue
+
+                offer = await session.get(BookingOffer, order.id)
+                if offer and offer.expires_at > now:
+                    continue
+
                 if (
                     order.remaining_due_at
                     and order.remaining_due_at <= now
+                    and order.requested_start_at
+                    and order.requested_start_at > now
                     and order.paid_rub < order.price_rub
                     and not order.payment_reminder_sent
                 ):
-                    remaining = max(0, order.price_rub - order.paid_rub)
-                    await self.bot.send_message(
-                        order.user_id,
-                        f"<b>⏰ По брони №{order.id} пора доплатить {remaining} ₽</b>",
-                    )
                     order.payment_reminder_sent = True
                     order.updated_at = now
                     await session.commit()
                     await update_buyer_card(session, self.bot, order)
+                    await send_ephemeral_notice(
+                        self.bot,
+                        order.user_id,
+                        f"<b>⏰ По брони №{order.id} пора доплатить остаток</b>\n\n"
+                        "Кнопка оплаты находится в карточке заказа.",
+                    )
 
                 if order.requested_start_at and order.requested_start_at <= now:
                     if order.paid_rub >= order.price_rub:
@@ -111,6 +125,10 @@ class OrderScheduler:
                         await auto_activate_paid_order(session, self.bot, order)
                     else:
                         await complete_order(session, self.bot, order, cancelled=True)
+
+            # This is cheap: two capacity checks and only booked rows. It also
+            # catches slots freed manually outside the scheduler.
+            await promote_waiting_bookings(session, self.bot)
 
             if (
                 self._last_prefix_audit is None
