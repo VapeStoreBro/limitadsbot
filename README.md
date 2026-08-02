@@ -20,6 +20,7 @@
 - окончание тарифа, открепление и снятие префикса;
 - клавиатурная админ-панель;
 - PostgreSQL и восстановление расписания после перезапуска;
+- тесты и автоматическая CI-проверка каждого обновления;
 - Telegram webhook и отдельный HMAC-проверяемый GitHub deploy webhook.
 
 ## Локальный запуск
@@ -33,41 +34,63 @@ cp .env.example .env
 python -m app
 ```
 
-## Установка на сервер 195.133.9.214
+## Схема сервера 195.133.9.214
 
-Проект использует отдельную директорию `/opt/limitadsbot`, отдельную базу и отдельные systemd-сервисы. Старый `kalivanbot` не затрагивается.
+Старый проект не затрагивается:
 
-```bash
-sudo PROJECT_DIR=/opt/limitadsbot bash deploy/install.sh
-cd /opt/limitadsbot
-sudo nano .env
-sudo docker compose up -d
-sudo systemctl enable --now limitadsbot.service limitadsbot-deploy.service
+```text
+/root/kalivanbot          kalivan.service
+порт 9000                 kalivan-webhook.service
 ```
 
-После этого добавьте конфигурацию из `deploy/nginx.conf.example` в HTTPS server block Nginx.
+Новый проект изолирован:
+
+```text
+/root/limitadsbot         limitadsbot.service
+порт 9102                 limitadsbot-deploy.service
+PostgreSQL host port      5433
+```
+
+## Установка на сервер
+
+```bash
+cd /root
+git clone https://github.com/VapeStoreBro/limitadsbot.git
+cd /root/limitadsbot
+bash deploy/install.sh
+nano .env
+docker compose up -d
+ufw allow 9102/tcp
+systemctl enable --now limitadsbot.service limitadsbot-deploy.service
+```
+
+Для первого теста `WEBHOOK_BASE_URL` оставляется пустым: Telegram-бот работает через polling, как существующий `kalivanbot`.
 
 ## GitHub deploy webhook
 
 В настройках репозитория создайте webhook:
 
 ```text
-https://ВАШ_ДОМЕН/deploy/ЗНАЧЕНИЕ_DEPLOY_PATH_SECRET
+http://195.133.9.214:9102/deploy/ЗНАЧЕНИЕ_DEPLOY_PATH_SECRET
 ```
 
 - Content type: `application/json`
 - Secret: значение `GITHUB_WEBHOOK_SECRET` из `.env`
 - Events: только `push`
 
-## Telegram webhook
+Слушатель проверяет HMAC-подпись, принимает только `VapeStoreBro/limitadsbot` и только ветку `main`, затем обновляет код, устанавливает зависимости, проверяет синтаксис и перезапускает только `limitadsbot.service`.
 
-Публичный HTTPS-адрес задаётся через:
+## Telegram webhook позже
+
+Для Telegram webhook понадобится публичный HTTPS-домен. Тогда задаются:
 
 ```text
 WEBHOOK_BASE_URL=https://ВАШ_ДОМЕН
 TELEGRAM_WEBHOOK_PATH=/telegram/СЕКРЕТНЫЙ_ПУТЬ
 TELEGRAM_WEBHOOK_SECRET=СЕКРЕТ_ЗАГОЛОВКА
 ```
+
+Пример Nginx находится в `deploy/nginx.conf.example`.
 
 ## Ограничение Telegram
 
