@@ -39,6 +39,15 @@ class Admin(Base):
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class UserBlock(Base):
+    __tablename__ = "user_blocks"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), primary_key=True)
+    reason: Mapped[str] = mapped_column(String(255), default="Заблокирован администрацией")
+    blocked_by: Mapped[int] = mapped_column(BigInteger)
+    blocked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class AppSetting(Base):
     __tablename__ = "app_settings"
 
