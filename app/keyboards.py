@@ -156,28 +156,9 @@ def booking_offer_keyboard(start_timestamp: int) -> InlineKeyboardMarkup:
 
 
 def best_setup_keyboard(button_count: int) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    if button_count < 2:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"➕ Добавить кнопку ({button_count}/2)",
-                    callback_data="best:add_button",
-                    style="primary",
-                )
-            ]
-        )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="✅ Перейти к предпросмотру",
-                callback_data="best:preview",
-                style="success",
-            )
-        ]
-    )
-    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="order:cancel", style="danger")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    from app.keyboards_v3 import simplified_best_keyboard
+
+    return simplified_best_keyboard(button_count)
 
 
 def preview_keyboard() -> InlineKeyboardMarkup:
