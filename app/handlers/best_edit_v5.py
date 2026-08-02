@@ -3,7 +3,6 @@ from __future__ import annotations
 from html import escape
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import select
@@ -11,10 +10,11 @@ from sqlalchemy import select
 from app.db.session import SessionFactory
 from app.enums import OrderStatus, TariffCode
 from app.handlers.best_buttons_v3 import normalize_url
-from app.models import AdOrder, OrderCard
-from app.services.order_cards import BUYER_CARD, update_buyer_card, update_staff_card
+from app.models import AdOrder
+from app.services.order_cards import update_buyer_card, update_staff_card
 from app.services.staff_delivery import current_staff_chat_id, send_ad_content_resilient
 from app.services.telegram_ads import replace_best_publication
+from app.services.ui_screen import delete_user_input, render_user_screen
 from app.states import BestEditFlow
 
 router = Router(name="best_edit_v5")
@@ -35,7 +35,7 @@ def edit_menu_text(order: AdOrder, saved: str | None = None) -> str:
     lines = [
         f"<b><u>✏️ РЕДАКТИРОВАНИЕ BEST №{order.id}</u></b>",
         "",
-        "Меняйте только нужную часть. После сохранения активный закреплённый пост обновится автоматически.",
+        "Меняйте только нужную часть. Активный пост обновится автоматически.",
         "",
         f"├ Текст: <b>{'✅ заполнен' if order.content_text else 'не заполнен'}</b>",
         f"├ Фото: <b>{len(order.media or [])}/8</b>",
@@ -128,43 +128,38 @@ async def get_owned_best(user_id: int, order_id: int) -> AdOrder | None:
         )
 
 
-async def edit_card(bot: Bot, order: AdOrder, text: str, markup: InlineKeyboardMarkup) -> None:
-    async with SessionFactory() as session:
-        card = await session.scalar(
-            select(OrderCard).where(
-                OrderCard.order_id == order.id,
-                OrderCard.kind == BUYER_CARD,
-                OrderCard.chat_id == order.user_id,
-            )
-        )
-    if not card:
-        async with SessionFactory() as session:
-            stored = await session.get(AdOrder, order.id)
-            if stored:
-                await update_buyer_card(session, bot, stored)
-        return
-    try:
-        await bot.edit_message_text(
-            chat_id=card.chat_id,
-            message_id=card.message_id,
-            text=text,
-            reply_markup=markup,
-        )
-    except TelegramBadRequest as error:
-        if "message is not modified" not in str(error).lower():
-            try:
-                await bot.edit_message_caption(
-                    chat_id=card.chat_id,
-                    message_id=card.message_id,
-                    caption=text,
-                    reply_markup=markup,
-                )
-            except Exception:
-                pass
+async def edit_card(
+    bot: Bot,
+    order: AdOrder,
+    text: str,
+    markup: InlineKeyboardMarkup,
+    *,
+    source_message: Message | None = None,
+) -> None:
+    await render_user_screen(
+        bot,
+        order.user_id,
+        text,
+        markup,
+        source_message=source_message,
+        media_key="main",
+    )
 
 
-async def show_menu(bot: Bot, order: AdOrder, saved: str | None = None) -> None:
-    await edit_card(bot, order, edit_menu_text(order, saved), edit_menu_keyboard(order))
+async def show_menu(
+    bot: Bot,
+    order: AdOrder,
+    saved: str | None = None,
+    *,
+    source_message: Message | None = None,
+) -> None:
+    await edit_card(
+        bot,
+        order,
+        edit_menu_text(order, saved),
+        edit_menu_keyboard(order),
+        source_message=source_message,
+    )
 
 
 async def after_change(session, bot: Bot, order: AdOrder, saved: str) -> None:
@@ -194,7 +189,7 @@ async def open_best_editor(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.clear()
     await state.update_data(best_edit_order_id=order.id)
-    await show_menu(callback.bot, order)
+    await show_menu(callback.bot, order, source_message=callback.message)
     await callback.answer("Редактор открыт")
 
 
@@ -205,7 +200,12 @@ async def close_best_editor(callback: CallbackQuery, state: FSMContext) -> None:
     async with SessionFactory() as session:
         order = await session.get(AdOrder, order_id)
         if order and order.user_id == callback.from_user.id:
-            await update_buyer_card(session, callback.bot, order)
+            await update_buyer_card(
+                session,
+                callback.bot,
+                order,
+                source_message=callback.message,
+            )
     await callback.answer("Изменения сохранены")
 
 
@@ -228,7 +228,13 @@ async def set_wait_state(
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"bestedit:menu:{order_id}")]
         ]
     )
-    await edit_card(callback.bot, order, f"<b>{title}</b>\n\n{hint}", markup)
+    await edit_card(
+        callback.bot,
+        order,
+        f"<b>{title}</b>\n\n{hint}",
+        markup,
+        source_message=callback.message,
+    )
     await callback.answer()
 
 
@@ -240,7 +246,7 @@ async def edit_text_start(callback: CallbackQuery, state: FSMContext) -> None:
         int(callback.data.rsplit(":", 1)[1]),
         BestEditFlow.waiting_text,
         "📝 Новый текст",
-        "Отправьте только новый текст поста. Жирное, подчёркивание и ссылки сохранятся.",
+        "Отправьте только новый текст поста. Оформление и ссылки сохранятся.",
     )
 
 
@@ -252,7 +258,7 @@ async def add_photo_start(callback: CallbackQuery, state: FSMContext) -> None:
         int(callback.data.rsplit(":", 1)[1]),
         BestEditFlow.waiting_photo,
         "🖼 Добавление фотографии",
-        "Отправьте одну фотографию. Её можно будет удалить отдельно в этом же редакторе.",
+        "Отправьте одну фотографию.",
     )
 
 
@@ -264,7 +270,7 @@ async def contact_start(callback: CallbackQuery, state: FSMContext) -> None:
         int(callback.data.rsplit(":", 1)[1]),
         BestEditFlow.waiting_contact,
         "👤 Контакт",
-        "Отправьте @username или ссылку на контакт. Существующая кнопка будет заменена.",
+        "Отправьте @username или ссылку. Существующий контакт будет заменён.",
     )
 
 
@@ -276,15 +282,8 @@ async def resource_start(callback: CallbackQuery, state: FSMContext) -> None:
         int(callback.data.rsplit(":", 1)[1]),
         BestEditFlow.waiting_resource,
         "🔗 Ресурс",
-        "Отправьте ссылку на канал, бота, барахолку или сайт. Существующая кнопка будет заменена.",
+        "Отправьте ссылку. Существующий ресурс будет заменён.",
     )
-
-
-async def delete_input(message: Message) -> None:
-    try:
-        await message.delete()
-    except Exception:
-        pass
 
 
 @router.message(BestEditFlow.waiting_text, F.text)
@@ -304,7 +303,7 @@ async def save_text(message: Message, state: FSMContext, bot: Bot) -> None:
         order.content_text = formatted
         await after_change(session, bot, order, "Текст обновлён")
     await state.clear()
-    await delete_input(message)
+    await delete_user_input(message)
 
 
 @router.message(BestEditFlow.waiting_photo, F.photo)
@@ -328,7 +327,7 @@ async def save_photo(message: Message, state: FSMContext, bot: Bot) -> None:
             order.media = media
             await after_change(session, bot, order, "Фотография добавлена")
     await state.clear()
-    await delete_input(message)
+    await delete_user_input(message)
 
 
 async def save_button_input(message: Message, state: FSMContext, bot: Bot, kind: str) -> None:
@@ -340,7 +339,7 @@ async def save_button_input(message: Message, state: FSMContext, bot: Bot, kind:
         if order:
             await show_menu(bot, order, "Ссылка не распознана")
         await state.clear()
-        await delete_input(message)
+        await delete_user_input(message)
         return
     async with SessionFactory() as session:
         order = await session.scalar(
@@ -367,7 +366,7 @@ async def save_button_input(message: Message, state: FSMContext, bot: Bot, kind:
             "Контакт обновлён" if kind == "contact" else "Ссылка на ресурс обновлена",
         )
     await state.clear()
-    await delete_input(message)
+    await delete_user_input(message)
 
 
 @router.message(BestEditFlow.waiting_contact, F.text)
@@ -401,8 +400,9 @@ async def photos_to_remove(callback: CallbackQuery) -> None:
     await edit_card(
         callback.bot,
         order,
-        f"<b>Удаление фотографии · Best №{order.id}</b>\n\nВыберите конкретное фото по его порядковому номеру.",
+        f"<b>Удаление фотографии · Best №{order.id}</b>\n\nВыберите номер фотографии.",
         InlineKeyboardMarkup(inline_keyboard=rows),
+        source_message=callback.message,
     )
     await callback.answer()
 

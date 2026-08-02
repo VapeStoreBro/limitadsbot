@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select, update
 
@@ -11,23 +10,21 @@ from app.keyboards_v3 import buyer_orders_keyboard
 from app.models import AdOrder, MiddlePinCandidate
 from app.services.lifecycle import complete_order
 from app.services.order_cards import update_buyer_card
-from app.services.staff_delivery import send_ad_content_resilient
 from app.services.telegram_ads import confirm_middle_pin
+from app.services.ui_screen import render_user_screen
 
 router = Router(name="buyer_lifecycle_v5")
 
 
 async def edit_screen(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup) -> None:
-    try:
-        await callback.message.edit_text(text, reply_markup=markup)
-        return
-    except TelegramBadRequest:
-        try:
-            await callback.message.edit_caption(caption=text, reply_markup=markup)
-            return
-        except Exception:
-            pass
-    await callback.bot.send_message(callback.from_user.id, text, reply_markup=markup)
+    await render_user_screen(
+        callback.bot,
+        callback.from_user.id,
+        text,
+        markup,
+        source_message=callback.message,
+        media_key="main",
+    )
 
 
 @router.callback_query(F.data == "profile:orders")
@@ -41,25 +38,26 @@ async def orders_list(callback: CallbackQuery) -> None:
                 .limit(30)
             )
         ).all()
-    await callback.answer()
-    if not orders:
-        markup = InlineKeyboardMarkup(
+    markup = (
+        buyer_orders_keyboard(orders)
+        if orders
+        else InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")]
             ]
         )
-        await edit_screen(
-            callback,
-            "<b><u>📂 МОИ РЕКЛАМЫ</u></b>\n\nУ вас пока нет заказов.",
-            markup,
-        )
-        return
+    )
     await edit_screen(
         callback,
         "<b><u>📂 МОИ РЕКЛАМЫ</u></b>\n\n"
-        "Выберите заказ. Дальнейшие действия будут выполняться в этой карточке.",
-        buyer_orders_keyboard(orders),
+        + (
+            "Выберите заказ. Все действия откроются в этом же сообщении."
+            if orders
+            else "У вас пока нет заказов."
+        ),
+        markup,
     )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("buyerorder:view:"))
@@ -77,23 +75,6 @@ async def order_view(callback: CallbackQuery, bot: Bot) -> None:
             return
         await update_buyer_card(session, bot, order, source_message=callback.message)
     await callback.answer("Открыто")
-
-
-@router.callback_query(F.data.startswith("buyerorder:show:"))
-async def show_order_post(callback: CallbackQuery) -> None:
-    order_id = int(callback.data.rsplit(":", 1)[1])
-    async with SessionFactory() as session:
-        order = await session.scalar(
-            select(AdOrder).where(
-                AdOrder.id == order_id,
-                AdOrder.user_id == callback.from_user.id,
-            )
-        )
-    if not order:
-        await callback.answer("Заказ не найден.", show_alert=True)
-        return
-    await callback.answer("Показываю пост")
-    await send_ad_content_resilient(callback.bot, callback.from_user.id, order)
 
 
 @router.callback_query(F.data.startswith("buyerorder:pin:"))
@@ -225,7 +206,7 @@ async def stop_confirm(callback: CallbackQuery) -> None:
     await edit_screen(
         callback,
         f"<b>Завершить рекламу №{order_id}?</b>\n\n"
-        "Закреп снимется, автопубликации остановятся, префикс будет удалён или пересчитан. Сообщения в группе останутся.",
+        "Закреп снимется, автопубликации остановятся, префикс будет удалён или пересчитан.",
         markup,
     )
     await callback.answer()

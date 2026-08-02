@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, FSInputFile
+from aiogram.types import CallbackQuery
 
 from app.config import get_settings
 from app.db.session import SessionFactory
@@ -25,6 +25,7 @@ from app.services.orders import (
     slot_available,
 )
 from app.services.price_card import ensure_price_card
+from app.services.ui_screen import render_user_screen
 from app.states import OrderFlow
 
 router = Router(name="order_selection_v2")
@@ -38,12 +39,12 @@ TARIFF_DESCRIPTIONS = {
     ),
     TariffCode.MIDDLE.value: (
         "📌 <b>Middle</b>\n"
-        "Самостоятельное размещение со ссылками, один закреп и до двух замен закреплённого поста. "
+        "Самостоятельное размещение со ссылками, один закреп и до двух замен. "
         "Одновременно доступно три места."
     ),
     TariffCode.BEST.value: (
         "👑 <b>Best</b>\n"
-        "Основной закреп, до двух кнопок и автоматическая публикация копии каждые три часа. "
+        "Основной закреп, до двух кнопок и автоматическая публикация каждые три часа. "
         "Одновременно доступно одно место."
     ),
 }
@@ -52,11 +53,27 @@ TARIFF_DESCRIPTIONS = {
 def selection_caption(selected: str | None = None) -> str:
     text = (
         "💎 <b><u>ШАГ 1 ИЗ 4 · ВЫБОР ТАРИФА</u></b>\n\n"
-        "Выберите подходящий вариант кнопкой под прайсом. После выбора появятся доступные сроки и ваша персональная цена."
+        "Выберите тариф. После выбора появятся сроки и ваша цена."
     )
     if selected:
         text += f"\n\n<b>Вы выбрали:</b> {TARIFF_NAMES[selected]}\n{TARIFF_DESCRIPTIONS[selected]}"
     return text
+
+
+async def render_price(
+    callback: CallbackQuery,
+    text: str,
+    markup,
+) -> None:
+    await render_user_screen(
+        callback.bot,
+        callback.from_user.id,
+        text,
+        markup,
+        source_message=callback.message,
+        media_key="price",
+        image_path=ensure_price_card(),
+    )
 
 
 @router.callback_query(F.data == "profile:buy")
@@ -67,13 +84,8 @@ async def open_price_v2(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
         return
     await state.clear()
     await state.set_state(OrderFlow.choosing_tariff)
+    await render_price(callback, selection_caption(), tariff_selection_keyboard())
     await callback.answer("Открываю прайс")
-    await bot.send_photo(
-        callback.from_user.id,
-        FSInputFile(ensure_price_card()),
-        caption=selection_caption(),
-        reply_markup=tariff_selection_keyboard(),
-    )
 
 
 @router.callback_query(OrderFlow.choosing_tariff, F.data.startswith("tariff:"))
@@ -82,9 +94,10 @@ async def select_tariff_v2(callback: CallbackQuery, state: FSMContext) -> None:
     async with SessionFactory() as session:
         prices = await prices_for_user(session, callback.from_user.id, tariff)
     await state.update_data(tariff_code=tariff)
-    await callback.message.edit_caption(
-        caption=selection_caption(tariff),
-        reply_markup=tariff_selection_keyboard(tariff, prices),
+    await render_price(
+        callback,
+        selection_caption(tariff),
+        tariff_selection_keyboard(tariff, prices),
     )
     await callback.answer(f"✅ {TARIFF_NAMES[tariff]}")
 
@@ -136,23 +149,17 @@ async def select_duration_v2(callback: CallbackQuery, state: FSMContext) -> None
     if next_slot:
         local = next_slot.astimezone(ZoneInfo(settings.timezone))
         await state.update_data(requested_start_at=next_slot.isoformat())
-        await callback.message.edit_caption(
-            caption=(
-                summary
-                + "\n\n⚠️ <b>Все места сейчас заняты.</b>\n"
-                f"Ближайший свободный запуск: <b>{local:%d.%m.%Y в %H:%M}</b>.\n"
-                "Для бронирования потребуется тестовая предоплата 50%."
-            ),
-            reply_markup=booking_offer_keyboard(int(next_slot.timestamp())),
+        text = (
+            summary
+            + "\n\n⚠️ <b>Все места сейчас заняты.</b>\n"
+            f"Ближайший запуск: <b>{local:%d.%m.%Y в %H:%M}</b>.\n"
+            "Если место освободится раньше, бот предложит его первому в очереди."
         )
+        markup = booking_offer_keyboard(int(next_slot.timestamp()))
     else:
-        await callback.message.edit_caption(
-            caption=(
-                summary
-                + "\n\n✅ <b>Место доступно.</b> Нажмите «Продолжить», чтобы загрузить рекламный пост."
-            ),
-            reply_markup=order_confirmation_keyboard(),
-        )
+        text = summary + "\n\n✅ <b>Место доступно.</b> Продолжайте оформление."
+        markup = order_confirmation_keyboard()
+    await render_price(callback, text, markup)
     await callback.answer("Срок выбран")
 
 
@@ -160,16 +167,5 @@ async def select_duration_v2(callback: CallbackQuery, state: FSMContext) -> None
 async def back_to_tariffs_v2(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(OrderFlow.choosing_tariff)
-    try:
-        await callback.message.edit_caption(
-            caption=selection_caption(),
-            reply_markup=tariff_selection_keyboard(),
-        )
-    except Exception:
-        await callback.bot.send_photo(
-            callback.from_user.id,
-            FSInputFile(ensure_price_card()),
-            caption=selection_caption(),
-            reply_markup=tariff_selection_keyboard(),
-        )
+    await render_price(callback, selection_caption(), tariff_selection_keyboard())
     await callback.answer("Выберите тариф")

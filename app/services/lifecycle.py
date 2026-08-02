@@ -8,11 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.enums import OrderStatus, TariffCode
-from app.models import AdOrder, OrderNotice, UserBlock
+from app.models import AdOrder, BookingOffer, OrderNotice, UserBlock
 from app.rules import advertising_prefix
 from app.services.order_cards import update_buyer_card, update_staff_card
 from app.services.orders import find_next_available_slot, slot_available
 from app.services.telegram_ads import activate_order, finish_order, refresh_user_prefix
+from app.services.ui_screen import send_ephemeral_notice
 
 settings = get_settings()
 
@@ -46,7 +47,7 @@ async def auto_activate_paid_order(
     bot: Bot,
     order: AdOrder,
 ) -> bool:
-    """Start after moderation + full payment, while respecting tariff capacity."""
+    """Start after moderation + full payment, while respecting capacity."""
     now = datetime.now(timezone.utc)
     if await session.get(UserBlock, order.user_id):
         order.status = OrderStatus.CANCELLED.value
@@ -89,6 +90,9 @@ async def auto_activate_paid_order(
         await update_buyer_card(session, bot, order)
         return False
 
+    offer = await session.get(BookingOffer, order.id)
+    if offer:
+        await session.delete(offer)
     order.status = OrderStatus.READY.value
     order.updated_at = now
     await session.commit()
@@ -114,6 +118,12 @@ async def auto_activate_paid_order(
             order,
             f"<b>✅ Заявка №{order.id} оплачена и реклама запущена автоматически</b>",
         )
+        await send_ephemeral_notice(
+            bot,
+            order.user_id,
+            f"<b>✅ Реклама №{order.id} запущена</b>\n\n"
+            "Управление находится в единственной карточке бота.",
+        )
     return activated
 
 
@@ -130,10 +140,12 @@ async def send_three_day_warning(
     code = "ends_in_3_days"
     if await notice_sent(session, order.id, code):
         return
-    await bot.send_message(
+    await update_buyer_card(session, bot, order)
+    await send_ephemeral_notice(
+        bot,
         order.user_id,
         f"<b>⏳ Реклама №{order.id} закончится через 3 дня</b>\n\n"
-        "Продлить размещение можно через администрацию. Управление текущим постом остаётся в карточке заказа.",
+        "Карточка заказа уже обновлена.",
     )
     await mark_notice(session, order.id, code)
 
@@ -145,18 +157,29 @@ async def complete_order(
     *,
     cancelled: bool = False,
 ) -> None:
+    tariff = order.tariff_code
     target = OrderStatus.CANCELLED.value if cancelled else OrderStatus.COMPLETED.value
+    offer = await session.get(BookingOffer, order.id)
+    if offer:
+        await session.delete(offer)
+        await session.commit()
     await finish_order(session, bot, order, status=target)
     await update_buyer_card(session, bot, order)
     code = f"finished:{target}"
     if not await notice_sent(session, order.id, code):
         title = "отменена" if cancelled else "завершена"
-        await bot.send_message(
+        await send_ephemeral_notice(
+            bot,
             order.user_id,
             f"<b>🏁 Реклама №{order.id} {title}</b>\n\n"
-            "Закреп снят, автоматические публикации остановлены, рекламный префикс обновлён.",
+            "Закреп снят, автопубликации остановлены, префикс обновлён.",
         )
         await mark_notice(session, order.id, code)
+
+    if tariff in {TariffCode.MIDDLE.value, TariffCode.BEST.value}:
+        from app.services.booking_queue import promote_waiting_bookings
+
+        await promote_waiting_bookings(session, bot, tariff)
 
 
 async def audit_advertising_prefixes(session: AsyncSession, bot: Bot) -> None:

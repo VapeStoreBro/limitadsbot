@@ -10,6 +10,7 @@ from app.handlers.order_flow_v2 import upload_instructions
 from app.keyboards_v3 import simplified_best_keyboard, upload_navigation_keyboard
 from app.models import User
 from app.rules import validate_post
+from app.services.ui_screen import delete_user_input, render_user_screen
 from app.states import OrderFlow
 
 router = Router(name="best_buttons_v3")
@@ -61,6 +62,21 @@ async def append_button(
     return True, "Кнопка добавлена.", len(candidate)
 
 
+async def render_setup(
+    callback: CallbackQuery,
+    text: str,
+    count: int,
+) -> None:
+    await render_user_screen(
+        callback.bot,
+        callback.from_user.id,
+        text,
+        simplified_best_keyboard(count),
+        source_message=callback.message,
+        media_key="main",
+    )
+
+
 @router.callback_query(OrderFlow.adding_buttons, F.data == "bestv3:contact")
 async def add_contact_button(callback: CallbackQuery, state: FSMContext) -> None:
     async with SessionFactory() as session:
@@ -72,18 +88,25 @@ async def add_contact_button(callback: CallbackQuery, state: FSMContext) -> None
             url=f"https://t.me/{user.username}",
             kind="contact",
         )
-        await callback.answer(text, show_alert=not ok)
         if ok:
-            await callback.message.edit_reply_markup(
-                reply_markup=simplified_best_keyboard(count)
+            await render_setup(
+                callback,
+                "<b>✅ Контакт добавлен</b>\n\n"
+                "Зелёная отметка означает, что кнопка готова. Можно добавить ресурс или открыть предпросмотр.",
+                count,
             )
+        await callback.answer(text, show_alert=not ok)
         return
 
     await state.update_data(waiting_button=True, waiting_button_kind="contact")
-    await callback.message.answer(
+    await render_user_screen(
+        callback.bot,
+        callback.from_user.id,
         "<b>👤 Контакт</b>\n\n"
         "Отправьте только <b>@username</b> или ссылку на контакт. Название кнопки бот поставит сам.",
-        reply_markup=upload_navigation_keyboard(),
+        upload_navigation_keyboard(),
+        source_message=callback.message,
+        media_key="main",
     )
     await callback.answer("Жду контакт")
 
@@ -91,10 +114,14 @@ async def add_contact_button(callback: CallbackQuery, state: FSMContext) -> None
 @router.callback_query(OrderFlow.adding_buttons, F.data == "bestv3:resource")
 async def add_resource_button(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(waiting_button=True, waiting_button_kind="resource")
-    await callback.message.answer(
+    await render_user_screen(
+        callback.bot,
+        callback.from_user.id,
         "<b>🔗 Ресурс</b>\n\n"
         "Отправьте только ссылку на канал, барахолку, сайт или бота. Название кнопки бот поставит сам.",
-        reply_markup=upload_navigation_keyboard(),
+        upload_navigation_keyboard(),
+        source_message=callback.message,
+        media_key="main",
     )
     await callback.answer("Жду ссылку")
 
@@ -112,32 +139,44 @@ async def redo_best_post(callback: CallbackQuery, state: FSMContext) -> None:
         submitting=False,
     )
     await state.set_state(OrderFlow.waiting_post)
-    await callback.answer("Отправьте новый пост")
-    await callback.bot.send_message(
+    await render_user_screen(
+        callback.bot,
         callback.from_user.id,
         upload_instructions(data.get("tariff_code", TariffCode.BEST.value)),
-        reply_markup=upload_navigation_keyboard(),
+        upload_navigation_keyboard(),
+        source_message=callback.message,
+        media_key="main",
     )
+    await callback.answer("Отправьте новый пост")
 
 
 @router.message(OrderFlow.adding_buttons, F.text)
 async def receive_simple_button_url(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     kind = data.get("waiting_button_kind")
+    count = len(data.get("buttons", []))
     if kind not in {"contact", "resource"}:
-        await message.answer(
-            "Выберите действие кнопкой под сообщением.",
-            reply_markup=simplified_best_keyboard(len(data.get("buttons", []))),
+        await render_user_screen(
+            message.bot,
+            message.from_user.id,
+            "Выберите действие кнопкой ниже.",
+            simplified_best_keyboard(count),
+            media_key="main",
         )
+        await delete_user_input(message)
         return
 
     url = normalize_url(message.text, allow_username=kind == "contact")
     if not url:
-        await message.answer(
+        await render_user_screen(
+            message.bot,
+            message.from_user.id,
             "<b>❌ Ссылка не распознана</b>\n\n"
             "Для контакта отправьте @username или полную ссылку. Для ресурса — ссылку, начинающуюся с https://.",
-            reply_markup=upload_navigation_keyboard(),
+            upload_navigation_keyboard(),
+            media_key="main",
         )
+        await delete_user_input(message)
         return
 
     label = "👤 Связаться" if kind == "contact" else "🔗 Перейти"
@@ -147,15 +186,16 @@ async def receive_simple_button_url(message: Message, state: FSMContext) -> None
         url=url,
         kind=kind,
     )
-    if not ok:
-        await message.answer(
-            f"<b>❌ {text}</b>",
-            reply_markup=simplified_best_keyboard(count),
-        )
-        return
-
-    await message.answer(
-        f"<b>✅ {text}</b>\n"
-        "Можно добавить вторую кнопку или сразу открыть предпросмотр.",
-        reply_markup=simplified_best_keyboard(count),
+    await render_user_screen(
+        message.bot,
+        message.from_user.id,
+        (
+            f"<b>✅ {text}</b>\n\n"
+            "Зелёная отметка означает, что кнопка готова. Можно добавить вторую кнопку или открыть предпросмотр."
+            if ok
+            else f"<b>❌ {text}</b>"
+        ),
+        simplified_best_keyboard(count),
+        media_key="main",
     )
+    await delete_user_input(message)

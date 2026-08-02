@@ -20,14 +20,18 @@ from app.handlers import (
     buyer_ads_v3,
     buyer_lifecycle_v5,
     client_controls_v4,
+    client_single_v6,
     common,
     customer,
     entry_v3,
     moderation,
     order_admin_v2,
+    order_compose_v6,
     order_flow_v2,
     order_selection_v2,
     payments_v3,
+    single_actions_v6,
+    single_screen_v6,
     submission_v5,
 )
 from app.services.price_card import ensure_price_card
@@ -39,14 +43,17 @@ settings = get_settings()
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# New lifecycle routers run before compatibility handlers. They keep one buyer
-# card, activate automatically after payment, confirm Middle pins and provide
-# partial Best editing without breaking older orders already stored in DB.
+# The v6 routers own private navigation, order composition and admin actions.
+# Older routers remain only for stale Telegram buttons and existing orders.
 dp.include_routers(
     entry_v3.router,
     common.router,
+    single_screen_v6.router,
+    single_actions_v6.router,
+    client_single_v6.router,
     client_controls_v4.router,
     order_selection_v2.router,
+    order_compose_v6.router,
     submission_v5.router,
     order_flow_v2.router,
     best_edit_v5.router,

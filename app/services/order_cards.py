@@ -5,16 +5,15 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.enums import OrderStatus, TariffCode
 from app.keyboards import DURATION_NAMES, TARIFF_NAMES
-from app.models import AdOrder, MiddlePinCandidate, OrderCard
+from app.models import AdOrder, BookingOffer, MiddlePinCandidate
 from app.models_extra import OrderDecision
+from app.services.ui_screen import register_user_screen, render_user_screen
 
 settings = get_settings()
 BUYER_CARD = "buyer"
@@ -50,20 +49,26 @@ def render_buyer_card(
     order: AdOrder,
     candidate: MiddlePinCandidate | None = None,
     decision: OrderDecision | None = None,
+    booking_offer: BookingOffer | None = None,
 ) -> str:
     contact = _button_by_kind(order, "contact")
     resource = _button_by_kind(order, "resource")
+    status = STATUS_TEXT.get(order.status, escape(order.status))
+    if booking_offer and order.paid_rub < order.price_rub:
+        status = "🔥 Место освободилось — доплатите, чтобы запуститься сейчас"
+
     lines = [
         f"<b><u>📦 РЕКЛАМА №{order.id}</u></b>",
         "",
-        f"<b>Статус:</b> {STATUS_TEXT.get(order.status, escape(order.status))}",
+        f"<b>Статус:</b> {status}",
     ]
     if decision and decision.action in {"revision", "reject"} and decision.comment:
-        lines.extend(
-            [
-                f"<b>Комментарий администрации:</b> {escape(decision.comment)}",
-            ]
+        lines.append(f"<b>Комментарий:</b> {escape(decision.comment)}")
+    if booking_offer and order.paid_rub < order.price_rub:
+        lines.append(
+            f"<b>Место удерживается до:</b> <code>{_date(booking_offer.expires_at)}</code>"
         )
+
     lines.extend(
         [
             "",
@@ -83,11 +88,11 @@ def render_buyer_card(
         )
     if order.tariff_code == TariffCode.MIDDLE.value:
         if candidate:
-            pin_status = "🟡 найден новый пост — подтвердите замену"
+            pin_status = "🟡 найден новый пост — подтвердите"
         elif order.awaiting_middle_pin and order.pinned_message_id:
-            pin_status = "ожидается новый рекламный пост в барахолке"
+            pin_status = "ожидается новый рекламный пост"
         elif order.awaiting_middle_pin:
-            pin_status = "ожидается первый рекламный пост в барахолке"
+            pin_status = "ожидается первый рекламный пост"
         elif order.pinned_message_id:
             pin_status = "✅ установлен"
         else:
@@ -108,17 +113,19 @@ def render_buyer_card(
         lines.extend(
             [
                 "",
-                "<b>Найден новый пост для закрепа:</b>",
+                "<b>Найден пост:</b>",
                 f"<i>{escape(candidate.preview_text or 'пост с фотографией')}</i>",
-                "Подтвердите его кнопкой ниже. До подтверждения старый закреп не меняется.",
+                "До подтверждения старый закреп не меняется.",
             ]
         )
-    if order.status == OrderStatus.ACTIVE.value:
-        lines.extend(["", "<i>Все изменения выполняются через кнопки этой карточки.</i>"])
     return "\n".join(lines)
 
 
-def buyer_card_keyboard(order: AdOrder, candidate: MiddlePinCandidate | None = None) -> InlineKeyboardMarkup:
+def buyer_card_keyboard(
+    order: AdOrder,
+    candidate: MiddlePinCandidate | None = None,
+    booking_offer: BookingOffer | None = None,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if order.status == OrderStatus.AWAITING_PAYMENT.value:
         rows.append(
@@ -142,10 +149,15 @@ def buyer_card_keyboard(order: AdOrder, candidate: MiddlePinCandidate | None = N
             ]
         )
     elif order.status == OrderStatus.BOOKED.value and order.paid_rub < order.price_rub:
+        label = (
+            f"🔥 Доплатить {order.price_rub - order.paid_rub} ₽ и запуститься"
+            if booking_offer
+            else f"🧪 Доплатить {order.price_rub - order.paid_rub} ₽"
+        )
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"🧪 Доплатить {order.price_rub - order.paid_rub} ₽",
+                    text=label,
                     callback_data=f"testpay:{order.id}:remainder",
                     style="success",
                 )
@@ -260,61 +272,14 @@ async def register_buyer_card(
     order: AdOrder,
     chat_id: int,
     message_id: int,
-) -> OrderCard:
-    now = datetime.now(timezone.utc)
-    card = await session.scalar(
-        select(OrderCard).where(
-            OrderCard.order_id == order.id,
-            OrderCard.kind == BUYER_CARD,
-            OrderCard.chat_id == chat_id,
-        )
+):
+    return await register_user_screen(
+        session,
+        order.user_id,
+        chat_id,
+        message_id,
+        media_key="unknown",
     )
-    if card is None:
-        card = OrderCard(
-            order_id=order.id,
-            kind=BUYER_CARD,
-            chat_id=chat_id,
-            message_id=message_id,
-            created_at=now,
-            updated_at=now,
-        )
-        session.add(card)
-    else:
-        card.message_id = message_id
-        card.updated_at = now
-    await session.commit()
-    return card
-
-
-async def _edit_existing(
-    bot: Bot,
-    card: OrderCard,
-    text: str,
-    markup: InlineKeyboardMarkup,
-) -> bool:
-    try:
-        await bot.edit_message_text(
-            chat_id=card.chat_id,
-            message_id=card.message_id,
-            text=text,
-            reply_markup=markup,
-        )
-        return True
-    except TelegramBadRequest as error:
-        if "message is not modified" in str(error).lower():
-            return True
-        try:
-            await bot.edit_message_caption(
-                chat_id=card.chat_id,
-                message_id=card.message_id,
-                caption=text,
-                reply_markup=markup,
-            )
-            return True
-        except Exception:
-            return False
-    except Exception:
-        return False
 
 
 async def update_buyer_card(
@@ -323,34 +288,20 @@ async def update_buyer_card(
     order: AdOrder,
     *,
     source_message: Message | None = None,
-) -> OrderCard:
+):
     candidate = await get_candidate(session, order.id)
     decision = await session.get(OrderDecision, order.id)
-    text = render_buyer_card(order, candidate, decision)
-    markup = buyer_card_keyboard(order, candidate)
-    card = await session.scalar(
-        select(OrderCard).where(
-            OrderCard.order_id == order.id,
-            OrderCard.kind == BUYER_CARD,
-            OrderCard.chat_id == order.user_id,
-        )
+    booking_offer = await session.get(BookingOffer, order.id)
+    text = render_buyer_card(order, candidate, decision, booking_offer)
+    markup = buyer_card_keyboard(order, candidate, booking_offer)
+    return await render_user_screen(
+        bot,
+        order.user_id,
+        text,
+        markup,
+        source_message=source_message,
+        media_key="main",
     )
-
-    if source_message is not None:
-        card = await register_buyer_card(
-            session,
-            order,
-            source_message.chat.id,
-            source_message.message_id,
-        )
-
-    if card and await _edit_existing(bot, card, text, markup):
-        card.updated_at = datetime.now(timezone.utc)
-        await session.commit()
-        return card
-
-    message = await bot.send_message(order.user_id, text, reply_markup=markup)
-    return await register_buyer_card(session, order, order.user_id, message.message_id)
 
 
 async def update_staff_card(
@@ -374,4 +325,12 @@ async def update_staff_card(
             reply_markup=reply_markup,
         )
     except Exception:
-        pass
+        try:
+            await bot.edit_message_caption(
+                chat_id=staff_chat_id,
+                message_id=order.moderation_card_message_id,
+                caption=text,
+                reply_markup=reply_markup,
+            )
+        except Exception:
+            pass
