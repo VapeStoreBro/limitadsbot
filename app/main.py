@@ -16,6 +16,7 @@ from app.handlers import (
     moderation,
     order_admin_v2,
     order_flow_v2,
+    order_selection_v2,
 )
 from app.services.price_card import ensure_price_card
 from app.services.scheduler import OrderScheduler
@@ -26,11 +27,11 @@ settings = get_settings()
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# New reliable handlers are connected before the legacy modules so that
-# text-only posts, moderation delivery, and actionable admin cards cannot be
-# intercepted by the older placeholder flow.
+# The polished and fault-tolerant order routers are connected before the
+# legacy handlers so that they receive the relevant states and callbacks first.
 dp.include_routers(
     common.router,
+    order_selection_v2.router,
     order_flow_v2.router,
     customer.router,
     moderation.router,
