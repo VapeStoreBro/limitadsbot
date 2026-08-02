@@ -11,6 +11,8 @@ BAZAAR_URL_KEY = "bazaar_url"
 STATS_RESET_AT_KEY = "stats_reset_at"
 CARD_PAYMENT_TEXT_KEY = "card_payment_text"
 STARS_RUB_PER_STAR_KEY = "stars_rub_per_star"
+STARS_SHOP_URL_KEY = "stars_shop_url"
+STARS_SHOP_TEXT_KEY = "stars_shop_text"
 
 DEFAULT_CARD_PAYMENT_TEXT = (
     "<b>💳 Оплата переводом на карту</b>\n\n"
@@ -19,6 +21,10 @@ DEFAULT_CARD_PAYMENT_TEXT = (
     "Переведите точную сумму по указанным ниже реквизитам:\n\n"
     "<code>УКАЖИТЕ РЕКВИЗИТЫ В НАСТРОЙКАХ БОТА</code>\n\n"
     "После перевода нажмите «Я оплатил». Администратор проверит поступление и подтвердит оплату."
+)
+DEFAULT_STARS_SHOP_TEXT = (
+    "⭐ <b>Не хватает Telegram Stars?</b>\n"
+    "Их можно приобрести в нашем отдельном сервисе."
 )
 
 
@@ -82,6 +88,24 @@ async def get_stars_rub_per_star(session: AsyncSession) -> int:
     except ValueError:
         value = 2
     return max(1, value)
+
+
+async def get_stars_shop_url(session: AsyncSession) -> str | None:
+    raw = str(await get_setting(session, STARS_SHOP_URL_KEY, "") or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("@"):
+        return f"https://t.me/{raw[1:]}"
+    if raw.startswith("t.me/"):
+        return "https://" + raw
+    return raw if raw.startswith(("https://", "tg://")) else None
+
+
+async def get_stars_shop_text(session: AsyncSession) -> str:
+    return str(
+        await get_setting(session, STARS_SHOP_TEXT_KEY, DEFAULT_STARS_SHOP_TEXT)
+        or DEFAULT_STARS_SHOP_TEXT
+    )
 
 
 async def get_stats_reset_at(session: AsyncSession) -> datetime | None:
