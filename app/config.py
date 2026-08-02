@@ -31,7 +31,18 @@ class Settings(BaseSettings):
     web_server_host: str = Field(default="127.0.0.1", alias="WEB_SERVER_HOST")
     web_server_port: int = Field(default=8092, alias="WEB_SERVER_PORT")
 
-    @field_validator("telegram_webhook_path")
+    # Real providers stay disabled until the test-payment flow is approved.
+    payments_enabled: bool = Field(default=False, alias="PAYMENTS_ENABLED")
+    payments_provider: str = Field(default="test", alias="PAYMENTS_PROVIDER")
+    yookassa_shop_id: str = Field(default="", alias="YOOKASSA_SHOP_ID")
+    yookassa_secret_key: str = Field(default="", alias="YOOKASSA_SECRET_KEY")
+    yookassa_return_url: str = Field(default="", alias="YOOKASSA_RETURN_URL")
+    yookassa_webhook_path: str = Field(
+        default="/payments/yookassa/webhook",
+        alias="YOOKASSA_WEBHOOK_PATH",
+    )
+
+    @field_validator("telegram_webhook_path", "yookassa_webhook_path")
     @classmethod
     def normalize_webhook_path(cls, value: str) -> str:
         return value if value.startswith("/") else f"/{value}"
@@ -39,6 +50,16 @@ class Settings(BaseSettings):
     @property
     def webhook_url(self) -> str:
         return f"{self.webhook_base_url.rstrip('/')}{self.telegram_webhook_path}"
+
+    @property
+    def yookassa_configured(self) -> bool:
+        return bool(
+            self.payments_enabled
+            and self.payments_provider == "yookassa"
+            and self.yookassa_shop_id
+            and self.yookassa_secret_key
+            and self.yookassa_return_url
+        )
 
 
 @lru_cache(maxsize=1)

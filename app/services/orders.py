@@ -137,9 +137,9 @@ async def create_order(
         buttons=buttons,
         requested_start_at=requested_start_at,
         requested_end_at=requested_end_at,
-        remaining_due_at=(
-            requested_start_at - timedelta(hours=24) if requested_start_at else None
-        ),
+        # The remainder deadline is created only when the reserved slot is
+        # offered for final purchase or becomes available early.
+        remaining_due_at=None,
         payment_reminder_sent=False,
         paid_rub=0,
         awaiting_middle_pin=False,
