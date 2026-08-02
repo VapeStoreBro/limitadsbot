@@ -9,6 +9,17 @@ STAFF_CHAT_KEY = "staff_chat_id"
 BAZAAR_CHAT_KEY = "bazaar_chat_id"
 BAZAAR_URL_KEY = "bazaar_url"
 STATS_RESET_AT_KEY = "stats_reset_at"
+CARD_PAYMENT_TEXT_KEY = "card_payment_text"
+STARS_RUB_PER_STAR_KEY = "stars_rub_per_star"
+
+DEFAULT_CARD_PAYMENT_TEXT = (
+    "<b>💳 Оплата переводом на карту</b>\n\n"
+    "Заказ: <code>№{order_id}</code>\n"
+    "К оплате: <b>{amount} ₽</b>\n\n"
+    "Переведите точную сумму по указанным ниже реквизитам:\n\n"
+    "<code>УКАЖИТЕ РЕКВИЗИТЫ В НАСТРОЙКАХ БОТА</code>\n\n"
+    "После перевода нажмите «Я оплатил». Администратор проверит поступление и подтвердит оплату."
+)
 
 
 async def get_setting(session: AsyncSession, key: str, default: str | None = None) -> str | None:
@@ -55,6 +66,22 @@ async def get_bazaar_chat_id(session: AsyncSession) -> int:
 async def get_bazaar_url(session: AsyncSession) -> str:
     settings = get_settings()
     return str(await get_setting(session, BAZAAR_URL_KEY, settings.bazaar_url) or settings.bazaar_url)
+
+
+async def get_card_payment_text(session: AsyncSession) -> str:
+    return str(
+        await get_setting(session, CARD_PAYMENT_TEXT_KEY, DEFAULT_CARD_PAYMENT_TEXT)
+        or DEFAULT_CARD_PAYMENT_TEXT
+    )
+
+
+async def get_stars_rub_per_star(session: AsyncSession) -> int:
+    raw = await get_setting(session, STARS_RUB_PER_STAR_KEY, "2")
+    try:
+        value = int(raw or "2")
+    except ValueError:
+        value = 2
+    return max(1, value)
 
 
 async def get_stats_reset_at(session: AsyncSession) -> datetime | None:

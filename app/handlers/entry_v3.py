@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardRemove
 
 from app.db.session import SessionFactory
 from app.handlers.common import show_access_result
@@ -14,6 +14,20 @@ from app.services.ui_screen import delete_user_input
 from app.services.users import is_admin, upsert_user
 
 router = Router(name="entry_v3")
+LAUNCH_ALIASES = {LAUNCH_TEXT, "Открыть бота", "🚀 Открыть"}
+
+
+async def hide_reply_keyboard(message: Message) -> None:
+    """Remove the one-time Telegram keyboard without leaving chat spam."""
+    try:
+        service = await message.answer(
+            "Открываю…",
+            reply_markup=ReplyKeyboardRemove(),
+            disable_notification=True,
+        )
+        await service.delete()
+    except Exception:
+        pass
 
 
 async def offer_launcher(message: Message, bot: Bot) -> None:
@@ -34,6 +48,7 @@ async def offer_launcher(message: Message, bot: Bot) -> None:
     await message.answer(
         "<b>Limit Ads готов</b>\n\nНажмите кнопку один раз, чтобы открыть главное меню.",
         reply_markup=launcher_keyboard(),
+        disable_notification=True,
     )
 
 
@@ -42,7 +57,7 @@ async def start_v3(message: Message, bot: Bot) -> None:
     await offer_launcher(message, bot)
 
 
-@router.message(F.chat.type == ChatType.PRIVATE, F.text == LAUNCH_TEXT)
+@router.message(F.chat.type == ChatType.PRIVATE, F.text.in_(LAUNCH_ALIASES))
 async def launch_v3(message: Message, bot: Bot) -> None:
     if not message.from_user:
         return
@@ -57,6 +72,7 @@ async def launch_v3(message: Message, bot: Bot) -> None:
         )
         return
 
+    await hide_reply_keyboard(message)
     await delete_user_input(message)
     await show_access_result(bot, message.chat.id, user, admin)
 
@@ -81,5 +97,6 @@ async def save_contact_v3(message: Message, bot: Bot) -> None:
         await session.commit()
         admin = await is_admin(session, user.id)
 
+    await hide_reply_keyboard(message)
     await delete_user_input(message)
     await show_access_result(bot, message.chat.id, user, admin)

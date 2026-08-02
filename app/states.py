@@ -9,6 +9,10 @@ class OrderFlow(StatesGroup):
     previewing = State()
 
 
+class RevisionFlow(StatesGroup):
+    waiting_post = State()
+
+
 class BestEditFlow(StatesGroup):
     waiting_text = State()
     waiting_photo = State()
@@ -28,3 +32,5 @@ class AdminFlow(StatesGroup):
     entering_staff_chat_id = State()
     entering_bazaar_chat_id = State()
     entering_bazaar_url = State()
+    entering_card_payment_text = State()
+    entering_stars_rate = State()
