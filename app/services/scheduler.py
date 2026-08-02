@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 
@@ -18,6 +19,8 @@ from app.services.lifecycle import (
 from app.services.order_cards import update_buyer_card
 from app.services.telegram_ads import publish_best_copy
 from app.services.ui_screen import send_ephemeral_notice
+
+logger = logging.getLogger(__name__)
 
 
 class OrderScheduler:
@@ -42,8 +45,8 @@ class OrderScheduler:
             try:
                 await self.tick()
             except Exception:
-                pass
-            await asyncio.sleep(60)
+                logger.exception("Order scheduler tick failed")
+            await asyncio.sleep(30)
 
     async def tick(self) -> None:
         now = datetime.now(timezone.utc)
@@ -98,24 +101,30 @@ class OrderScheduler:
                 if offer and offer.expires_at > now:
                     continue
 
-                if (
-                    order.remaining_due_at
-                    and order.remaining_due_at <= now
-                    and order.requested_start_at
-                    and order.requested_start_at > now
-                    and order.paid_rub < order.price_rub
-                    and not order.payment_reminder_sent
-                ):
-                    order.payment_reminder_sent = True
-                    order.updated_at = now
-                    await session.commit()
-                    await update_buyer_card(session, self.bot, order)
-                    await send_ephemeral_notice(
-                        self.bot,
-                        order.user_id,
-                        f"<b>⏰ По брони №{order.id} пора доплатить остаток</b>\n\n"
-                        "Кнопка оплаты находится в карточке заказа.",
-                    )
+                if order.paid_rub < order.price_rub and order.remaining_due_at:
+                    remaining = order.remaining_due_at - now
+                    if remaining <= timedelta(0):
+                        await complete_order(session, self.bot, order, cancelled=True)
+                        await send_ephemeral_notice(
+                            self.bot,
+                            order.user_id,
+                            f"<b>⌛ Бронь №{order.id} отменена</b>\n\n"
+                            "Остаток не был внесён в течение 24 часов.",
+                            seconds=30,
+                        )
+                        continue
+                    if remaining <= timedelta(hours=3) and not order.payment_reminder_sent:
+                        order.payment_reminder_sent = True
+                        order.updated_at = now
+                        await session.commit()
+                        await update_buyer_card(session, self.bot, order)
+                        await send_ephemeral_notice(
+                            self.bot,
+                            order.user_id,
+                            f"<b>⏰ По брони №{order.id} осталось меньше трёх часов</b>\n\n"
+                            "Доплатите остаток кнопкой в карточке заказа.",
+                            seconds=30,
+                        )
 
                 if order.requested_start_at and order.requested_start_at <= now:
                     if order.paid_rub >= order.price_rub:
@@ -126,8 +135,6 @@ class OrderScheduler:
                     else:
                         await complete_order(session, self.bot, order, cancelled=True)
 
-            # This is cheap: two capacity checks and only booked rows. It also
-            # catches slots freed manually outside the scheduler.
             await promote_waiting_bookings(session, self.bot)
 
             if (

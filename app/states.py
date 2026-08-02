@@ -26,3 +26,5 @@ class AdminFlow(StatesGroup):
     entering_price_amount = State()
     choosing_price_discount = State()
     entering_staff_chat_id = State()
+    entering_bazaar_chat_id = State()
+    entering_bazaar_url = State()

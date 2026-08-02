@@ -7,7 +7,9 @@ from aiogram.types import User as TelegramUser
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db.session import SessionFactory
 from app.models import Admin, User
+from app.services.app_settings import get_bazaar_chat_id
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +26,11 @@ def _status_value(raw_status: object) -> str:
 
 
 async def inspect_membership(bot: Bot, user_id: int) -> tuple[str, str, str | None]:
-    """Return (result, Telegram status, error).
-
-    result is one of: member, not_member, unknown.
-    """
-    settings = get_settings()
+    """Return (result, Telegram status, error) for the configured bazaar."""
+    async with SessionFactory() as session:
+        bazaar_chat_id = await get_bazaar_chat_id(session)
     try:
-        member = await bot.get_chat_member(settings.bazaar_chat_id, user_id)
+        member = await bot.get_chat_member(bazaar_chat_id, user_id)
         status = _status_value(member.status)
         if status in MEMBER_STATUSES:
             return "member", status, None
@@ -44,7 +44,7 @@ async def inspect_membership(bot: Bot, user_id: int) -> tuple[str, str, str | No
         logger.exception(
             "Unable to inspect membership for user %s in chat %s",
             user_id,
-            settings.bazaar_chat_id,
+            bazaar_chat_id,
         )
         return "unknown", "unknown", f"{type(error).__name__}: {error}"
 

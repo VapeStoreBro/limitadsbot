@@ -10,9 +10,15 @@ from app.config import get_settings
 from app.enums import OrderStatus, TariffCode
 from app.models import AdOrder, BookingOffer, OrderNotice, UserBlock
 from app.rules import advertising_prefix
+from app.services.app_settings import get_bazaar_chat_id
 from app.services.order_cards import update_buyer_card, update_staff_card
 from app.services.orders import find_next_available_slot, slot_available
-from app.services.telegram_ads import activate_order, finish_order, refresh_user_prefix
+from app.services.telegram_ads import (
+    activate_order,
+    finish_order,
+    refresh_bot_prefix,
+    refresh_user_prefix,
+)
 from app.services.ui_screen import send_ephemeral_notice
 
 settings = get_settings()
@@ -183,29 +189,46 @@ async def complete_order(
 
 
 async def audit_advertising_prefixes(session: AsyncSession, bot: Bot) -> None:
-    """Low-frequency audit for users who ever had an order."""
-    user_ids = (
-        await session.scalars(select(AdOrder.user_id).distinct().order_by(AdOrder.user_id))
-    ).all()
-    for user_id in user_ids:
-        active = (
-            await session.scalars(
-                select(AdOrder).where(
-                    AdOrder.user_id == user_id,
-                    AdOrder.status == OrderStatus.ACTIVE.value,
-                    AdOrder.ends_at.is_not(None),
-                )
+    """One group request per audit instead of one request per historic buyer."""
+    bazaar_chat_id = await get_bazaar_chat_id(session)
+    active_orders = (
+        await session.scalars(
+            select(AdOrder).where(
+                AdOrder.status == OrderStatus.ACTIVE.value,
+                AdOrder.ends_at.is_not(None),
             )
-        ).all()
-        try:
-            member = await bot.get_chat_member(settings.bazaar_chat_id, user_id)
-        except Exception:
-            continue
-        custom_title = getattr(member, "custom_title", None) or ""
-        if active:
-            furthest = max(order.ends_at for order in active if order.ends_at)
-            expected = advertising_prefix(furthest, settings.timezone)
-            if custom_title != expected:
-                await refresh_user_prefix(session, bot, user_id)
-        elif custom_title.startswith("Реклама до"):
+        )
+    ).all()
+
+    active_by_user: dict[int, list[AdOrder]] = {}
+    for order in active_orders:
+        active_by_user.setdefault(order.user_id, []).append(order)
+
+    try:
+        me = await bot.get_me()
+        bot_id = me.id
+    except Exception:
+        bot_id = None
+    try:
+        administrators = await bot.get_chat_administrators(bazaar_chat_id)
+    except Exception:
+        administrators = []
+    admin_by_id = {member.user.id: member for member in administrators}
+
+    for user_id, orders in active_by_user.items():
+        furthest = max(order.ends_at for order in orders if order.ends_at)
+        expected = advertising_prefix(furthest, settings.timezone)
+        current = getattr(admin_by_id.get(user_id), "custom_title", None) or ""
+        if current != expected:
             await refresh_user_prefix(session, bot, user_id)
+
+    active_ids = set(active_by_user)
+    for member in administrators:
+        user_id = member.user.id
+        if user_id == bot_id:
+            continue
+        title = getattr(member, "custom_title", None) or ""
+        if user_id not in active_ids and title.startswith("Реклама до"):
+            await refresh_user_prefix(session, bot, user_id)
+
+    await refresh_bot_prefix(session, bot)
