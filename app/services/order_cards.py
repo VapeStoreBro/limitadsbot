@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.enums import OrderStatus, TariffCode
 from app.keyboards import DURATION_NAMES, TARIFF_NAMES
 from app.models import AdOrder, MiddlePinCandidate, OrderCard
+from app.models_extra import OrderDecision
 
 settings = get_settings()
 BUYER_CARD = "buyer"
@@ -45,20 +46,34 @@ def _button_by_kind(order: AdOrder, kind: str) -> dict[str, str] | None:
     return None
 
 
-def render_buyer_card(order: AdOrder, candidate: MiddlePinCandidate | None = None) -> str:
+def render_buyer_card(
+    order: AdOrder,
+    candidate: MiddlePinCandidate | None = None,
+    decision: OrderDecision | None = None,
+) -> str:
     contact = _button_by_kind(order, "contact")
     resource = _button_by_kind(order, "resource")
     lines = [
         f"<b><u>📦 РЕКЛАМА №{order.id}</u></b>",
         "",
         f"<b>Статус:</b> {STATUS_TEXT.get(order.status, escape(order.status))}",
-        "",
-        f"├ Тариф: <b>{TARIFF_NAMES.get(order.tariff_code, order.tariff_code)}</b>",
-        f"├ Срок: <b>{DURATION_NAMES.get(order.duration_code, order.duration_code)}</b>",
-        f"├ Стоимость: <b>{order.price_rub} ₽</b>",
-        f"├ Оплачено: <b>{order.paid_rub} ₽</b>",
-        f"├ Фотографий: <b>{len(order.media or [])}/8</b>",
     ]
+    if decision and decision.action in {"revision", "reject"} and decision.comment:
+        lines.extend(
+            [
+                f"<b>Комментарий администрации:</b> {escape(decision.comment)}",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            f"├ Тариф: <b>{TARIFF_NAMES.get(order.tariff_code, order.tariff_code)}</b>",
+            f"├ Срок: <b>{DURATION_NAMES.get(order.duration_code, order.duration_code)}</b>",
+            f"├ Стоимость: <b>{order.price_rub} ₽</b>",
+            f"├ Оплачено: <b>{order.paid_rub} ₽</b>",
+            f"├ Фотографий: <b>{len(order.media or [])}/8</b>",
+        ]
+    )
     if order.tariff_code == TariffCode.BEST.value:
         lines.extend(
             [
@@ -310,7 +325,8 @@ async def update_buyer_card(
     source_message: Message | None = None,
 ) -> OrderCard:
     candidate = await get_candidate(session, order.id)
-    text = render_buyer_card(order, candidate)
+    decision = await session.get(OrderDecision, order.id)
+    text = render_buyer_card(order, candidate, decision)
     markup = buyer_card_keyboard(order, candidate)
     card = await session.scalar(
         select(OrderCard).where(
