@@ -3,13 +3,14 @@ from datetime import datetime, timezone
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import CommandStart
-from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.types import Message
 
 from app.db.session import SessionFactory
 from app.handlers.common import show_access_result
 from app.keyboards import phone_keyboard
 from app.keyboards_v3 import LAUNCH_TEXT, launcher_keyboard
 from app.models import User
+from app.services.ui_screen import delete_user_input
 from app.services.users import is_admin, upsert_user
 
 router = Router(name="entry_v3")
@@ -56,7 +57,7 @@ async def launch_v3(message: Message, bot: Bot) -> None:
         )
         return
 
-    await message.answer("Главное меню открыто", reply_markup=ReplyKeyboardRemove())
+    await delete_user_input(message)
     await show_access_result(bot, message.chat.id, user, admin)
 
 
@@ -78,8 +79,7 @@ async def save_contact_v3(message: Message, bot: Bot) -> None:
         user.phone = message.contact.phone_number
         user.last_seen_at = datetime.now(timezone.utc)
         await session.commit()
+        admin = await is_admin(session, user.id)
 
-    await message.answer(
-        "<b>✅ Номер сохранён</b>\n\nТеперь откройте главное меню.",
-        reply_markup=launcher_keyboard(),
-    )
+    await delete_user_input(message)
+    await show_access_result(bot, message.chat.id, user, admin)
