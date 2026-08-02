@@ -6,9 +6,9 @@ Wants=network-online.target docker.service
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/limitadsbot
-EnvironmentFile=/opt/limitadsbot/.env
-ExecStart=/opt/limitadsbot/.venv/bin/python -m app
+WorkingDirectory=/root/limitadsbot
+EnvironmentFile=/root/limitadsbot/.env
+ExecStart=/root/limitadsbot/.venv/bin/python -m app
 Restart=always
 RestartSec=5
 TimeoutStopSec=30
