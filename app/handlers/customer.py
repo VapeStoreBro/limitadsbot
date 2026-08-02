@@ -1,9 +1,17 @@
 from datetime import datetime, timedelta, timezone
+from html import escape
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -13,42 +21,112 @@ from app.keyboards import (
     DURATION_NAMES,
     TARIFF_NAMES,
     activation_keyboard,
-    durations_keyboard,
+    best_setup_keyboard,
+    booking_offer_keyboard,
     moderation_keyboard,
-    start_mode_keyboard,
-    tariffs_keyboard,
+    order_confirmation_keyboard,
+    phone_keyboard,
+    preview_keyboard,
+    tariff_selection_keyboard,
 )
-from app.models import AdOrder, Payment
+from app.models import AdOrder, Payment, User
 from app.rules import validate_post
 from app.services.media_groups import MediaGroupCollector
-from app.services.orders import create_order, deposit_amount, get_price, prices_for_user, slot_available
+from app.services.orders import (
+    create_order,
+    deposit_amount,
+    find_next_available_slot,
+    get_price,
+    prices_for_user,
+    slot_available,
+)
+from app.services.price_card import ensure_price_card
 from app.services.telegram_ads import send_ad_content
-from app.services.users import upsert_user
+from app.services.users import inspect_membership, is_admin, upsert_user
 from app.states import OrderFlow
 
 router = Router(name="customer")
 collector = MediaGroupCollector()
 settings = get_settings()
 
+TARIFF_DETAILS = {
+    TariffCode.STANDARD.value: (
+        "Самостоятельные публикации. Без активных ссылок, телефонов и кнопок."
+    ),
+    TariffCode.MIDDLE.value: (
+        "Самостоятельные публикации, ссылки разрешены, один закреп и две замены."
+    ),
+    TariffCode.BEST.value: (
+        "Основной закреп, автопубликации каждые 3 часа и до двух кнопок."
+    ),
+}
 
-async def ensure_member(message: Message, bot: Bot) -> bool:
-    if not message.from_user:
-        return False
+
+def price_caption(selected_tariff: str | None = None) -> str:
+    text = (
+        "<b>Выберите тариф</b>\n\n"
+        "Standard — самостоятельное размещение\n"
+        "Middle — размещение + закреп\n"
+        "Best — закреп + автопубликации каждые 3 часа"
+    )
+    if selected_tariff:
+        text += f"\n\nВыбрано: <b>✅ {TARIFF_NAMES[selected_tariff]}</b>\n{TARIFF_DETAILS[selected_tariff]}"
+    return text
+
+
+async def access_allowed(user_id: int, bot: Bot) -> tuple[bool, bool]:
+    """Return (allowed, admin)."""
     async with SessionFactory() as session:
-        user = await upsert_user(session, bot, message.from_user)
-    if not user.is_bazaar_member:
-        await message.answer("❌ Купить рекламу могут только участники тестовой барахолки.")
-        return False
-    return True
+        user = await session.get(User, user_id)
+        admin = await is_admin(session, user_id)
+    if admin:
+        return True, True
+    if not user or not user.phone:
+        await bot.send_message(
+            user_id,
+            "📱 Отправьте номер телефона для продолжения.",
+            reply_markup=phone_keyboard(),
+        )
+        return False, False
+    result, _, _ = await inspect_membership(bot, user_id)
+    if result != "member":
+        await bot.send_message(user_id, "Сначала подтвердите участие через /start.")
+        return False, False
+    return True, False
 
 
-@router.message(F.text == "📢 Купить рекламу")
-async def buy_ad(message: Message, state: FSMContext, bot: Bot) -> None:
-    if not await ensure_member(message, bot):
+async def open_price(message: Message, state: FSMContext, bot: Bot) -> None:
+    if not message.from_user:
+        return
+    allowed, _ = await access_allowed(message.from_user.id, bot)
+    if not allowed:
         return
     await state.clear()
     await state.set_state(OrderFlow.choosing_tariff)
-    await message.answer("Выберите тариф:", reply_markup=tariffs_keyboard())
+    image = ensure_price_card()
+    await message.answer_photo(
+        FSInputFile(image),
+        caption=price_caption(),
+        reply_markup=tariff_selection_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "profile:buy")
+async def buy_ad(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    allowed, _ = await access_allowed(callback.from_user.id, bot)
+    if not allowed:
+        await callback.answer()
+        return
+    await callback.answer()
+    await state.clear()
+    await state.set_state(OrderFlow.choosing_tariff)
+    image = ensure_price_card()
+    await bot.send_photo(
+        callback.from_user.id,
+        FSInputFile(image),
+        caption=price_caption(),
+        reply_markup=tariff_selection_keyboard(),
+    )
 
 
 @router.callback_query(OrderFlow.choosing_tariff, F.data.startswith("tariff:"))
@@ -57,66 +135,138 @@ async def choose_tariff(callback: CallbackQuery, state: FSMContext) -> None:
     async with SessionFactory() as session:
         prices = await prices_for_user(session, callback.from_user.id, tariff)
     await state.update_data(tariff_code=tariff)
-    await state.set_state(OrderFlow.choosing_duration)
-    await callback.message.edit_text(
-        f"Тариф: <b>{TARIFF_NAMES[tariff]}</b>\nВыберите длительность:",
-        reply_markup=durations_keyboard(tariff, prices),
+    await callback.message.edit_caption(
+        caption=price_caption(tariff),
+        reply_markup=tariff_selection_keyboard(tariff, prices),
+    )
+    await callback.answer(f"Выбран {TARIFF_NAMES[tariff]}")
+
+
+@router.callback_query(OrderFlow.choosing_tariff, F.data.startswith("duration:"))
+async def choose_duration(callback: CallbackQuery, state: FSMContext) -> None:
+    _, tariff, duration = callback.data.split(":", 2)
+    now = datetime.now(timezone.utc)
+    async with SessionFactory() as session:
+        price, hours, discount = await get_price(
+            session,
+            callback.from_user.id,
+            tariff,
+            duration,
+        )
+        available = await slot_available(
+            session,
+            tariff,
+            now,
+            now + timedelta(hours=hours),
+        )
+        next_slot = None
+        if tariff != TariffCode.STANDARD.value and not available:
+            next_slot = await find_next_available_slot(session, tariff, hours, now)
+
+    await state.update_data(
+        tariff_code=tariff,
+        duration_code=duration,
+        price_rub=price,
+        duration_hours=hours,
+        requested_start_at=None,
+        content_text=None,
+        validation_text=None,
+        media=[],
+        buttons=[],
+    )
+    await state.set_state(OrderFlow.confirming_selection)
+
+    discount_line = f"\nВаша скидка: <b>{discount}%</b>" if discount else ""
+    if next_slot:
+        local = next_slot.astimezone(ZoneInfo(settings.timezone))
+        await state.update_data(requested_start_at=next_slot.isoformat())
+        await callback.message.edit_caption(
+            caption=(
+                f"<b>{TARIFF_NAMES[tariff]}</b>\n"
+                f"Срок: <b>{DURATION_NAMES[duration]}</b>\n"
+                f"Стоимость: <b>{price} ₽</b>{discount_line}\n\n"
+                "Сейчас все места заняты.\n"
+                f"Ближайший свободный запуск: <b>{local:%d.%m.%Y в %H:%M}</b>\n"
+                "Бронирование — предоплата 50%."
+            ),
+            reply_markup=booking_offer_keyboard(int(next_slot.timestamp())),
+        )
+    else:
+        await callback.message.edit_caption(
+            caption=(
+                f"<b>{TARIFF_NAMES[tariff]}</b>\n"
+                f"Срок: <b>{DURATION_NAMES[duration]}</b>\n"
+                f"Стоимость: <b>{price} ₽</b>{discount_line}\n\n"
+                f"{TARIFF_DETAILS[tariff]}"
+            ),
+            reply_markup=order_confirmation_keyboard(),
+        )
+    await callback.answer()
+
+
+@router.callback_query(OrderFlow.confirming_selection, F.data == "order:continue")
+async def continue_order(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(requested_start_at=None)
+    await state.set_state(OrderFlow.waiting_post)
+    await callback.message.edit_caption(
+        caption=(
+            "<b>Пришлите готовый рекламный пост</b>\n\n"
+            "Можно отправить текст или альбом до 8 фотографий.\n"
+            "Видео и GIF не принимаются."
+        ),
+        reply_markup=None,
     )
     await callback.answer()
 
 
-@router.callback_query(OrderFlow.choosing_duration, F.data.startswith("duration:"))
-async def choose_duration(callback: CallbackQuery, state: FSMContext) -> None:
-    _, tariff, duration = callback.data.split(":", 2)
-    await state.update_data(tariff_code=tariff, duration_code=duration)
-    if tariff in {TariffCode.MIDDLE.value, TariffCode.BEST.value}:
-        await state.set_state(OrderFlow.choosing_start_mode)
-        await callback.message.edit_text("Выберите способ запуска:", reply_markup=start_mode_keyboard())
-    else:
-        await state.update_data(requested_start_at=None)
-        await state.set_state(OrderFlow.waiting_post)
-        await callback.message.edit_text("Пришлите готовый пост или фотоальбом до восьми фотографий.")
-    await callback.answer()
-
-
-@router.callback_query(OrderFlow.choosing_start_mode, F.data.startswith("startmode:"))
-async def choose_start_mode(callback: CallbackQuery, state: FSMContext) -> None:
-    mode = callback.data.split(":", 1)[1]
-    if mode == "book":
-        await state.set_state(OrderFlow.entering_booking_date)
-        await callback.message.edit_text(
-            "Введите дату и время запуска по Москве: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>.\n"
-            "Предоплата — 50%, остаток не позднее чем за 24 часа."
-        )
-    else:
-        await state.update_data(requested_start_at=None)
-        await state.set_state(OrderFlow.waiting_post)
-        await callback.message.edit_text("Пришлите готовый пост или фотоальбом до восьми фотографий.")
-    await callback.answer()
-
-
-@router.message(OrderFlow.entering_booking_date, F.text)
-async def booking_date(message: Message, state: FSMContext) -> None:
-    try:
-        local = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M").replace(
-            tzinfo=ZoneInfo(settings.timezone)
-        )
-        requested = local.astimezone(timezone.utc)
-    except ValueError:
-        await message.answer("Неверный формат. Пример: <code>15.08.2026 18:30</code>")
-        return
-    if requested < datetime.now(timezone.utc) + timedelta(hours=1):
-        await message.answer("Бронирование должно быть минимум за один час.")
-        return
+@router.callback_query(OrderFlow.confirming_selection, F.data.startswith("order:book:"))
+async def confirm_booking(callback: CallbackQuery, state: FSMContext) -> None:
+    timestamp = int(callback.data.rsplit(":", 1)[1])
+    requested = datetime.fromtimestamp(timestamp, tz=timezone.utc)
     await state.update_data(requested_start_at=requested.isoformat())
     await state.set_state(OrderFlow.waiting_post)
-    await message.answer("Теперь пришлите готовый пост или фотоальбом.")
+    await callback.message.edit_caption(
+        caption=(
+            "<b>Место выбрано для бронирования</b>\n\n"
+            "Пришлите готовый рекламный пост или альбом до 8 фотографий."
+        ),
+        reply_markup=None,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "order:back_tariffs")
+async def back_to_tariffs(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(OrderFlow.choosing_tariff)
+    await callback.message.edit_caption(
+        caption=price_caption(),
+        reply_markup=tariff_selection_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "order:cancel")
+async def cancel_order(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption="Оформление отменено.", reply_markup=None)
+        else:
+            await callback.message.edit_text("Оформление отменено.", reply_markup=None)
+    except Exception:
+        await callback.message.answer("Оформление отменено.")
+    await callback.answer()
 
 
 async def process_post(messages: list[Message], state: FSMContext, bot: Bot) -> None:
     first = messages[0]
     data = await state.get_data()
-    tariff = data["tariff_code"]
+    tariff = data.get("tariff_code")
+    if not tariff:
+        await first.answer("Начните оформление заново через профиль.")
+        return
+
     source = next((item for item in messages if item.caption), first)
     plain_text = source.caption or source.text or ""
     formatted_text = source.html_caption if source.caption else source.html_text or ""
@@ -146,16 +296,16 @@ async def process_post(messages: list[Message], state: FSMContext, bot: Bot) -> 
         validation_text=plain_text,
         media=media,
         buttons=[],
+        waiting_button=False,
     )
     if tariff == TariffCode.BEST.value:
         await state.set_state(OrderFlow.adding_buttons)
         await first.answer(
-            "Best разрешает до двух кнопок. Каждую пришлите так:\n"
-            "<code>Название | https://ссылка</code>\n"
-            "После добавления напишите <code>готово</code>."
+            "Можно добавить до двух кнопок.",
+            reply_markup=best_setup_keyboard(0),
         )
         return
-    await finalize_order(first, state, bot)
+    await show_preview(first, state, bot)
 
 
 @router.message(OrderFlow.waiting_post)
@@ -166,77 +316,139 @@ async def receive_post(message: Message, state: FSMContext, bot: Bot) -> None:
         await process_post([message], state, bot)
 
 
-@router.message(OrderFlow.adding_buttons, F.text)
-async def add_buttons(message: Message, state: FSMContext, bot: Bot) -> None:
+@router.callback_query(OrderFlow.adding_buttons, F.data == "best:add_button")
+async def ask_best_button(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     buttons = list(data.get("buttons", []))
-    if message.text.strip().lower() == "готово":
-        result = validate_post(
-            data["tariff_code"],
-            data.get("validation_text", ""),
-            data["media"],
-            buttons,
-        )
-        if not result.ok:
-            await message.answer(f"❌ {result.error}")
-            return
-        await finalize_order(message, state, bot)
+    if len(buttons) >= 2:
+        await callback.answer("Уже добавлены две кнопки.", show_alert=True)
         return
-    if len(buttons) >= 2 or "|" not in message.text:
-        await message.answer("Формат: <code>Название | https://ссылка</code>, максимум две кнопки.")
+    await state.update_data(waiting_button=True)
+    await callback.message.answer(
+        "Отправьте кнопку в формате:\n<code>Название | https://ссылка</code>"
+    )
+    await callback.answer()
+
+
+@router.message(OrderFlow.adding_buttons, F.text)
+async def receive_best_button(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if not data.get("waiting_button"):
+        await message.answer("Используйте кнопки под сообщением.")
+        return
+    buttons = list(data.get("buttons", []))
+    if "|" not in message.text or len(buttons) >= 2:
+        await message.answer("Формат: <code>Название | https://ссылка</code>")
         return
     title, url = (part.strip() for part in message.text.split("|", 1))
     candidate = buttons + [{"text": title[:64], "url": url}]
     result = validate_post(
         data["tariff_code"],
         data.get("validation_text", ""),
-        data["media"],
+        data.get("media", []),
         candidate,
     )
     if not result.ok:
         await message.answer(f"❌ {result.error}")
         return
-    await state.update_data(buttons=candidate)
-    await message.answer(f"✅ Кнопка добавлена ({len(candidate)}/2).")
+    await state.update_data(buttons=candidate, waiting_button=False)
+    await message.answer(
+        f"✅ Кнопка добавлена ({len(candidate)}/2).",
+        reply_markup=best_setup_keyboard(len(candidate)),
+    )
 
 
-async def finalize_order(message: Message, state: FSMContext, bot: Bot) -> None:
+@router.callback_query(OrderFlow.adding_buttons, F.data == "best:preview")
+async def best_to_preview(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await callback.answer()
+    await show_preview(callback.message, state, bot)
+
+
+async def show_preview(message: Message, state: FSMContext, bot: Bot) -> None:
     data = await state.get_data()
-    requested = datetime.fromisoformat(data["requested_start_at"]) if data.get("requested_start_at") else None
+    preview = SimpleNamespace(
+        content_text=data.get("content_text", ""),
+        media=data.get("media", []),
+        buttons=data.get("buttons", []),
+    )
+    await message.answer("<b>Предпросмотр рекламы:</b>")
+    await send_ad_content(bot, message.chat.id, preview)
+    requested = data.get("requested_start_at")
+    booking_line = ""
+    if requested:
+        local = datetime.fromisoformat(requested).astimezone(ZoneInfo(settings.timezone))
+        booking_line = f"\nБронь: <b>{local:%d.%m.%Y %H:%M}</b>"
+    await state.set_state(OrderFlow.previewing)
+    await message.answer(
+        f"Тариф: <b>{TARIFF_NAMES[data['tariff_code']]}</b>\n"
+        f"Срок: <b>{DURATION_NAMES[data['duration_code']]}</b>\n"
+        f"Стоимость: <b>{data['price_rub']} ₽</b>{booking_line}",
+        reply_markup=preview_keyboard(),
+    )
+
+
+@router.callback_query(OrderFlow.previewing, F.data == "preview:redo")
+async def redo_post(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(
+        content_text=None,
+        validation_text=None,
+        media=[],
+        buttons=[],
+        waiting_button=False,
+    )
+    await state.set_state(OrderFlow.waiting_post)
+    await callback.message.edit_text(
+        "Пришлите новый рекламный пост или альбом до 8 фотографий.",
+        reply_markup=None,
+    )
+    await callback.answer()
+
+
+@router.callback_query(OrderFlow.previewing, F.data == "preview:submit")
+async def submit_preview(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    data = await state.get_data()
+    requested = (
+        datetime.fromisoformat(data["requested_start_at"])
+        if data.get("requested_start_at")
+        else None
+    )
     async with SessionFactory() as session:
-        _, hours, _ = await get_price(
-            session,
-            message.from_user.id,
-            data["tariff_code"],
-            data["duration_code"],
-        )
         if requested and not await slot_available(
             session,
             data["tariff_code"],
             requested,
-            requested + timedelta(hours=hours),
+            requested + timedelta(hours=data["duration_hours"]),
         ):
-            await message.answer("❌ На это время нет свободного места.")
+            await callback.answer("Это место уже заняли. Начните оформление заново.", show_alert=True)
             await state.clear()
             return
+
         order = await create_order(
             session,
-            user_id=message.from_user.id,
+            user_id=callback.from_user.id,
             tariff_code=data["tariff_code"],
             duration_code=data["duration_code"],
-            content_text=data["content_text"],
-            media=data["media"],
+            content_text=data.get("content_text", ""),
+            media=data.get("media", []),
             buttons=data.get("buttons", []),
             requested_start_at=requested,
         )
+        user = await session.get(User, callback.from_user.id)
+
+        full_name = " ".join(
+            part for part in [user.first_name, user.last_name] if part
+        ).strip()
         await bot.send_message(
             settings.staff_chat_id,
-            f"🆕 <b>Заявка №{order.id}</b>\n"
-            f"Клиент: <a href=\"tg://user?id={order.user_id}\">{order.user_id}</a>\n"
-            f"Тариф: {TARIFF_NAMES[order.tariff_code]}\n"
-            f"Период: {DURATION_NAMES[order.duration_code]}\n"
-            f"Цена: {order.price_rub} ₽\n"
-            f"Бронь: {order.requested_start_at or 'нет'}",
+            f"🆕 <b>Заявка №{order.id}</b>\n\n"
+            f"Клиент: <a href=\"tg://user?id={user.id}\">{escape(full_name or str(user.id))}</a>\n"
+            f"ID: <code>{user.id}</code>\n"
+            f"Username: @{escape(user.username) if user.username else 'нет'}\n"
+            f"Телефон: <code>{escape(user.phone or 'не указан')}</code>\n"
+            f"Тариф: <b>{TARIFF_NAMES[order.tariff_code]}</b>\n"
+            f"Срок: <b>{DURATION_NAMES[order.duration_code]}</b>\n"
+            f"Цена: <b>{order.price_rub} ₽</b>\n"
+            f"Бронь: <b>{order.requested_start_at or 'нет'}</b>",
         )
         await send_ad_content(bot, settings.staff_chat_id, order)
         card = await bot.send_message(
@@ -246,8 +458,13 @@ async def finalize_order(message: Message, state: FSMContext, bot: Bot) -> None:
         )
         order.moderation_card_message_id = card.message_id
         await session.commit()
+
     await state.clear()
-    await message.answer(f"✅ Заявка №{order.id} отправлена администрации. Цена: {order.price_rub} ₽.")
+    await callback.message.edit_text(
+        f"✅ Заявка №{order.id} отправлена администрации.",
+        reply_markup=None,
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("testpay:"))
@@ -307,31 +524,36 @@ async def test_payment(callback: CallbackQuery, bot: Bot) -> None:
         )
 
 
-@router.message(F.text == "📦 Мои заказы")
-async def my_orders(message: Message) -> None:
+async def send_my_orders(user_id: int, bot: Bot) -> None:
     async with SessionFactory() as session:
         orders = (
             await session.scalars(
                 select(AdOrder)
-                .where(AdOrder.user_id == message.from_user.id)
+                .where(AdOrder.user_id == user_id)
                 .order_by(AdOrder.id.desc())
                 .limit(10)
             )
         ).all()
     if not orders:
-        await message.answer("Заказов пока нет.")
+        await bot.send_message(user_id, "У вас пока нет рекламных заявок.")
         return
-    lines = ["<b>Последние заказы:</b>"]
+
+    lines = ["<b>Мои рекламы</b>"]
     buttons: list[list[InlineKeyboardButton]] = []
     for order in orders:
-        lines.append(f"№{order.id} · {order.tariff_code} · {order.price_rub} ₽ · {order.status}")
+        lines.append(
+            f"\n№{order.id} · {TARIFF_NAMES.get(order.tariff_code, order.tariff_code)}"
+            f"\n{DURATION_NAMES.get(order.duration_code, order.duration_code)} · {order.price_rub} ₽"
+            f"\nСтатус: <b>{order.status}</b>"
+        )
         if order.status == OrderStatus.BOOKED.value and order.paid_rub < order.price_rub:
             remaining = order.price_rub - order.paid_rub
             buttons.append(
                 [
                     InlineKeyboardButton(
-                        text=f"Доплатить {remaining} ₽ по №{order.id}",
+                        text=f"💳 Доплатить {remaining} ₽ по №{order.id}",
                         callback_data=f"testpay:{order.id}:remainder",
+                        style="success",
                     )
                 ]
             )
@@ -348,8 +570,18 @@ async def my_orders(message: Message) -> None:
                     )
                 ]
             )
-    markup = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
-    await message.answer("\n".join(lines), reply_markup=markup)
+    buttons.append([InlineKeyboardButton(text="⬅️ Профиль", callback_data="profile:home")])
+    await bot.send_message(
+        user_id,
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.callback_query(F.data == "profile:orders")
+async def my_orders_callback(callback: CallbackQuery, bot: Bot) -> None:
+    await callback.answer()
+    await send_my_orders(callback.from_user.id, bot)
 
 
 @router.callback_query(F.data.startswith("middlepin:"))
@@ -357,7 +589,11 @@ async def request_middle_pin(callback: CallbackQuery) -> None:
     order_id = int(callback.data.split(":", 1)[1])
     async with SessionFactory() as session:
         order = await session.get(AdOrder, order_id)
-        if not order or order.user_id != callback.from_user.id or order.status != OrderStatus.ACTIVE.value:
+        if (
+            not order
+            or order.user_id != callback.from_user.id
+            or order.status != OrderStatus.ACTIVE.value
+        ):
             await callback.answer("Закреп недоступен.", show_alert=True)
             return
         if order.tariff_code != TariffCode.MIDDLE.value or order.pin_changes_used >= 2:
