@@ -11,11 +11,14 @@ from app.config import get_settings
 from app.db.bootstrap import bootstrap_database
 from app.handlers import (
     admin,
+    admin_controls_v5,
     admin_orders_v4,
     admin_pages_v4,
     admin_panel_v3,
     best_buttons_v3,
+    best_edit_v5,
     buyer_ads_v3,
+    buyer_lifecycle_v5,
     client_controls_v4,
     common,
     customer,
@@ -25,6 +28,7 @@ from app.handlers import (
     order_flow_v2,
     order_selection_v2,
     payments_v3,
+    submission_v5,
 )
 from app.services.price_card import ensure_price_card
 from app.services.scheduler import OrderScheduler
@@ -35,18 +39,23 @@ settings = get_settings()
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Guards run before order/payment handlers so a blocked customer cannot finish
-# an old flow, pay a cancelled order or activate an already paid placement.
+# New lifecycle routers run before compatibility handlers. They keep one buyer
+# card, activate automatically after payment, confirm Middle pins and provide
+# partial Best editing without breaking older orders already stored in DB.
 dp.include_routers(
     entry_v3.router,
     common.router,
     client_controls_v4.router,
     order_selection_v2.router,
+    submission_v5.router,
     order_flow_v2.router,
+    best_edit_v5.router,
     best_buttons_v3.router,
     payments_v3.router,
+    buyer_lifecycle_v5.router,
     buyer_ads_v3.router,
     moderation.router,
+    admin_controls_v5.router,
     admin_orders_v4.router,
     order_admin_v2.router,
     admin_pages_v4.router,
