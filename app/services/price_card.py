@@ -4,8 +4,8 @@ PROJECT_DIR = Path(__file__).resolve().parents[2]
 BRAND_DIR = PROJECT_DIR / "assets" / "brand"
 RUNTIME_DIR = PROJECT_DIR / "runtime"
 
-PRICE_CARD_PATH = BRAND_DIR / "limit_price.png"
-MAIN_MENU_PATH = BRAND_DIR / "limit_main_menu.png"
+PRICE_CARD_PATH = BRAND_DIR / "limit_price.jpg"
+MAIN_MENU_PATH = BRAND_DIR / "limit_main_menu.jpg"
 LEGACY_PRICE_PATH = RUNTIME_DIR / "limit_ads_price.png"
 
 
