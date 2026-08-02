@@ -17,6 +17,7 @@ from app.services.lifecycle import (
     send_three_day_warning,
 )
 from app.services.order_cards import update_buyer_card
+from app.services.orders import find_next_available_slot, slot_available
 from app.services.telegram_ads import publish_best_copy
 from app.services.ui_screen import send_ephemeral_notice
 
@@ -124,6 +125,31 @@ class OrderScheduler:
                         continue
 
                     if not offer:
+                        available = await slot_available(
+                            session,
+                            order.tariff_code,
+                            now,
+                            now + timedelta(hours=order.duration_hours),
+                            order.id,
+                        )
+                        if not available:
+                            next_slot = await find_next_available_slot(
+                                session,
+                                order.tariff_code,
+                                order.duration_hours,
+                                now,
+                            )
+                            order.requested_start_at = next_slot
+                            order.requested_end_at = next_slot + timedelta(
+                                hours=order.duration_hours
+                            )
+                            order.remaining_due_at = None
+                            order.payment_reminder_sent = False
+                            order.updated_at = now
+                            await session.commit()
+                            await update_buyer_card(session, self.bot, order)
+                            continue
+
                         expires = now + FINAL_PAYMENT_WINDOW
                         offer = BookingOffer(
                             order_id=order.id,
