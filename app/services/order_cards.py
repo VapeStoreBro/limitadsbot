@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from html import escape
 from zoneinfo import ZoneInfo
 
@@ -20,7 +20,7 @@ BUYER_CARD = "buyer"
 
 STATUS_TEXT = {
     OrderStatus.MODERATION.value: "🛡 Пост проверяет администрация",
-    OrderStatus.REVISION.value: "✏️ Пост нужно исправить",
+    OrderStatus.REVISION.value: "✏️ Пост нужно исправить и повторно отправить",
     OrderStatus.REJECTED.value: "❌ Заявка отклонена",
     OrderStatus.AWAITING_PAYMENT.value: "💳 Одобрено — ожидается полная оплата",
     OrderStatus.AWAITING_DEPOSIT.value: "💳 Одобрено — ожидается предоплата 50%",
@@ -64,6 +64,10 @@ def render_buyer_card(
     ]
     if decision and decision.action in {"revision", "reject"} and decision.comment:
         lines.append(f"<b>Комментарий:</b> {escape(decision.comment)}")
+    if order.status == OrderStatus.REVISION.value:
+        lines.append(
+            "<b>Что делать:</b> измените нужные части поста, затем нажмите «Отправить повторно на модерацию»."
+        )
     if booking_offer and order.paid_rub < order.price_rub:
         lines.append(
             f"<b>Место удерживается до:</b> <code>{_date(booking_offer.expires_at)}</code>"
@@ -121,6 +125,16 @@ def render_buyer_card(
     return "\n".join(lines)
 
 
+def _payment_button(order: AdOrder, kind: str, label: str) -> list[InlineKeyboardButton]:
+    return [
+        InlineKeyboardButton(
+            text=label,
+            callback_data=f"payv9:choose:{order.id}:{kind}",
+            style="success",
+        )
+    ]
+
+
 def buyer_card_keyboard(
     order: AdOrder,
     candidate: MiddlePinCandidate | None = None,
@@ -129,36 +143,49 @@ def buyer_card_keyboard(
     rows: list[list[InlineKeyboardButton]] = []
     if order.status == OrderStatus.AWAITING_PAYMENT.value:
         rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"🧪 Оплатить {max(0, order.price_rub - order.paid_rub)} ₽",
-                    callback_data=f"testpay:{order.id}:full",
-                    style="success",
-                )
-            ]
+            _payment_button(
+                order,
+                "full",
+                f"💰 Выбрать оплату · {max(0, order.price_rub - order.paid_rub)} ₽",
+            )
         )
     elif order.status == OrderStatus.AWAITING_DEPOSIT.value:
         amount = max(1, order.price_rub // 2)
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"🧪 Внести предоплату {amount} ₽",
-                    callback_data=f"testpay:{order.id}:deposit",
-                    style="success",
-                )
-            ]
-        )
+        rows.append(_payment_button(order, "deposit", f"💰 Внести предоплату · {amount} ₽"))
     elif order.status == OrderStatus.BOOKED.value and order.paid_rub < order.price_rub:
         label = (
             f"🔥 Доплатить {order.price_rub - order.paid_rub} ₽ и запуститься"
             if booking_offer
-            else f"🧪 Доплатить {order.price_rub - order.paid_rub} ₽"
+            else f"💰 Доплатить {order.price_rub - order.paid_rub} ₽"
         )
+        rows.append(_payment_button(order, "remainder", label))
+
+    if order.status == OrderStatus.REVISION.value:
+        if order.tariff_code == TariffCode.BEST.value:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="✏️ Изменить Best по частям",
+                        callback_data=f"bestedit:menu:{order.id}",
+                        style="primary",
+                    )
+                ]
+            )
+        else:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="✏️ Заменить рекламный пост",
+                        callback_data=f"revisionv9:replace:{order.id}",
+                        style="primary",
+                    )
+                ]
+            )
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=label,
-                    callback_data=f"testpay:{order.id}:remainder",
+                    text="📤 Отправить повторно на модерацию",
+                    callback_data=f"revisionv9:submit:{order.id}",
                     style="success",
                 )
             ]
@@ -240,6 +267,7 @@ def buyer_card_keyboard(
             ]
         )
     elif order.tariff_code == TariffCode.BEST.value and order.status not in {
+        OrderStatus.REVISION.value,
         OrderStatus.COMPLETED.value,
         OrderStatus.CANCELLED.value,
         OrderStatus.REJECTED.value,
@@ -278,7 +306,7 @@ async def register_buyer_card(
         order.user_id,
         chat_id,
         message_id,
-        media_key="unknown",
+        media_key="text:buyer",
     )
 
 
@@ -300,7 +328,8 @@ async def update_buyer_card(
         text,
         markup,
         source_message=source_message,
-        media_key="main",
+        media_key="buyer",
+        text_only=True,
     )
 
 
