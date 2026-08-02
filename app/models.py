@@ -3,7 +3,17 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -46,6 +56,19 @@ class UserBlock(Base):
     reason: Mapped[str] = mapped_column(String(255), default="Заблокирован администрацией")
     blocked_by: Mapped[int] = mapped_column(BigInteger)
     blocked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class UserScreen(Base):
+    """The one permanent bot interface message in a user's private chat."""
+
+    __tablename__ = "user_screens"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    media_key: Mapped[str] = mapped_column(String(160), default="main")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class AppSetting(Base):
@@ -116,6 +139,20 @@ class AdOrder(Base):
     user: Mapped[User] = relationship(back_populates="orders")
     publications: Mapped[list[Publication]] = relationship(back_populates="order")
     payments: Mapped[list[Payment]] = relationship(back_populates="order")
+
+
+class BookingOffer(Base):
+    """A temporary early-start offer created when a constrained slot becomes free."""
+
+    __tablename__ = "booking_offers"
+
+    order_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("ad_orders.id"),
+        primary_key=True,
+    )
+    offered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class OrderCard(Base):
