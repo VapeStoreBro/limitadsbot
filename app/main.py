@@ -36,6 +36,7 @@ from app.handlers import (
     single_screen_v6,
     submission_v5,
 )
+from app.payments.webhook import handle_yookassa_webhook, payment_return
 from app.services.price_card import ensure_price_card
 from app.services.scheduler import OrderScheduler
 
@@ -109,9 +110,15 @@ async def health(_: web.Request) -> web.Response:
     return web.json_response({"ok": True, "service": "limitadsbot"})
 
 
+async def yookassa_webhook(request: web.Request) -> web.Response:
+    return await handle_yookassa_webhook(request, bot)
+
+
 def run_webhook() -> None:
     app = web.Application()
     app.router.add_get("/health", health)
+    app.router.add_post(settings.yookassa_webhook_path, yookassa_webhook)
+    app.router.add_get("/payments/return", payment_return)
     SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
