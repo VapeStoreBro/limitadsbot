@@ -11,6 +11,7 @@ from app.enums import OrderStatus, PublicationKind, TariffCode
 from app.keyboards import best_buttons
 from app.models import AdOrder, MiddlePinCandidate, Publication
 from app.rules import advertising_prefix
+from app.services.app_settings import get_bazaar_chat_id
 
 
 async def send_ad_content(bot: Bot, chat_id: int, order: AdOrder) -> list[Message]:
@@ -72,6 +73,7 @@ async def send_ad_content(bot: Bot, chat_id: int, order: AdOrder) -> list[Messag
 
 async def refresh_user_prefix(session: AsyncSession, bot: Bot, user_id: int) -> None:
     settings = get_settings()
+    bazaar_chat_id = await get_bazaar_chat_id(session)
     active = (
         await session.scalars(
             select(AdOrder).where(
@@ -84,7 +86,7 @@ async def refresh_user_prefix(session: AsyncSession, bot: Bot, user_id: int) -> 
     if not active:
         try:
             await bot.promote_chat_member(
-                settings.bazaar_chat_id,
+                bazaar_chat_id,
                 user_id,
                 can_manage_chat=False,
                 can_delete_messages=False,
@@ -102,7 +104,7 @@ async def refresh_user_prefix(session: AsyncSession, bot: Bot, user_id: int) -> 
     furthest_end = max(order.ends_at for order in active if order.ends_at is not None)
     try:
         await bot.promote_chat_member(
-            settings.bazaar_chat_id,
+            bazaar_chat_id,
             user_id,
             can_manage_chat=True,
             can_delete_messages=False,
@@ -114,11 +116,45 @@ async def refresh_user_prefix(session: AsyncSession, bot: Bot, user_id: int) -> 
             can_pin_messages=False,
         )
         await bot.set_chat_administrator_custom_title(
-            settings.bazaar_chat_id,
+            bazaar_chat_id,
             user_id,
             advertising_prefix(furthest_end, settings.timezone),
         )
     except Exception:
+        pass
+
+
+async def refresh_bot_prefix(session: AsyncSession, bot: Bot) -> None:
+    """Show the same advertising date on the bot while a Best is active."""
+    settings = get_settings()
+    bazaar_chat_id = await get_bazaar_chat_id(session)
+    active_best = (
+        await session.scalars(
+            select(AdOrder).where(
+                AdOrder.tariff_code == TariffCode.BEST.value,
+                AdOrder.status == OrderStatus.ACTIVE.value,
+                AdOrder.ends_at.is_not(None),
+            )
+        )
+    ).all()
+    try:
+        me = await bot.get_me()
+        title = (
+            advertising_prefix(
+                max(order.ends_at for order in active_best if order.ends_at),
+                settings.timezone,
+            )
+            if active_best
+            else "Limit Ads"
+        )
+        await bot.set_chat_administrator_custom_title(
+            bazaar_chat_id,
+            me.id,
+            title,
+        )
+    except Exception:
+        # Telegram may forbid changing the bot's own title depending on who
+        # promoted it. This must never stop advertising automation.
         pass
 
 
@@ -155,25 +191,24 @@ async def suspend_best_pin_for_middle(
     session: AsyncSession,
     bot: Bot,
 ) -> None:
-    """Make a newly confirmed Middle post the newest pin.
-
-    Middle pins remain pinned. Only the currently promoted Best pin is removed;
-    the next scheduled Best copy will become the newest pin again.
-    """
-    settings = get_settings()
+    """Give a new Middle post the top position, then schedule Best in 2 minutes."""
+    bazaar_chat_id = await get_bazaar_chat_id(session)
+    now = datetime.now(timezone.utc)
     best_orders = (
         await session.scalars(
             select(AdOrder).where(
                 AdOrder.tariff_code == TariffCode.BEST.value,
                 AdOrder.status == OrderStatus.ACTIVE.value,
-                AdOrder.pinned_message_id.is_not(None),
             )
         )
     ).all()
     for best in best_orders:
-        await _unpin_message(bot, settings.bazaar_chat_id, best.pinned_message_id)
+        await _unpin_message(bot, bazaar_chat_id, best.pinned_message_id)
         best.pinned_message_id = None
-        best.updated_at = datetime.now(timezone.utc)
+        # Do not wait for the normal three-hour cycle: the next scheduler pass
+        # after this timestamp publishes a fresh Best and places it on top.
+        best.next_publish_at = now + timedelta(minutes=2)
+        best.updated_at = now
 
 
 async def pin_best_as_newest(
@@ -182,8 +217,8 @@ async def pin_best_as_newest(
     order: AdOrder,
     message_id: int,
 ) -> None:
-    """Keep exactly one current Best pin while preserving all Middle pins."""
-    settings = get_settings()
+    """Keep one current Best pin while preserving all Middle pins."""
+    bazaar_chat_id = await get_bazaar_chat_id(session)
     other_best = (
         await session.scalars(
             select(AdOrder).where(
@@ -195,13 +230,13 @@ async def pin_best_as_newest(
     ).all()
     for best in other_best:
         if best.pinned_message_id != message_id:
-            await _unpin_message(bot, settings.bazaar_chat_id, best.pinned_message_id)
+            await _unpin_message(bot, bazaar_chat_id, best.pinned_message_id)
         if best.id != order.id:
             best.pinned_message_id = None
             best.updated_at = datetime.now(timezone.utc)
 
     await bot.pin_chat_message(
-        settings.bazaar_chat_id,
+        bazaar_chat_id,
         message_id,
         disable_notification=True,
     )
@@ -216,9 +251,9 @@ async def restore_order_pin(
 ) -> bool:
     if not order.pinned_message_id:
         return False
-    settings = get_settings()
+    bazaar_chat_id = await get_bazaar_chat_id(session)
     await bot.pin_chat_message(
-        settings.bazaar_chat_id,
+        bazaar_chat_id,
         order.pinned_message_id,
         disable_notification=True,
     )
@@ -237,7 +272,6 @@ async def activate_order(
     actor_id: int = 0,
 ) -> bool:
     """Activate once. Repeated calls are safe and never reset the timer."""
-    settings = get_settings()
     if order.status == OrderStatus.ACTIVE.value:
         return True
     if order.paid_rub < order.price_rub:
@@ -250,9 +284,10 @@ async def activate_order(
         await session.commit()
         return False
 
+    bazaar_chat_id = await get_bazaar_chat_id(session)
     messages: list[Message] = []
     if order.tariff_code == TariffCode.BEST.value:
-        messages = await send_ad_content(bot, settings.bazaar_chat_id, order)
+        messages = await send_ad_content(bot, bazaar_chat_id, order)
         await pin_best_as_newest(session, bot, order, messages[0].message_id)
         order.next_publish_at = now + timedelta(hours=3)
         await _record_publications(session, order, messages, PublicationKind.MAIN.value)
@@ -268,6 +303,8 @@ async def activate_order(
     order.updated_at = now
     await session.commit()
     await refresh_user_prefix(session, bot, order.user_id)
+    if order.tariff_code == TariffCode.BEST.value:
+        await refresh_bot_prefix(session, bot)
     return True
 
 
@@ -281,7 +318,7 @@ async def replace_best_publication(
         await session.commit()
         return
 
-    settings = get_settings()
+    bazaar_chat_id = await get_bazaar_chat_id(session)
     now = datetime.now(timezone.utc)
     old_main = (
         await session.scalars(
@@ -296,16 +333,16 @@ async def replace_best_publication(
     if order.pinned_message_id:
         old_ids.add(order.pinned_message_id)
 
-    messages = await send_ad_content(bot, settings.bazaar_chat_id, order)
+    messages = await send_ad_content(bot, bazaar_chat_id, order)
     new_main = messages[0]
     await pin_best_as_newest(session, bot, order, new_main.message_id)
 
     for old_id in old_ids:
         if old_id == new_main.message_id:
             continue
-        await _unpin_message(bot, settings.bazaar_chat_id, old_id)
+        await _unpin_message(bot, bazaar_chat_id, old_id)
         try:
-            await bot.delete_message(settings.bazaar_chat_id, old_id)
+            await bot.delete_message(bazaar_chat_id, old_id)
         except Exception:
             pass
 
@@ -322,7 +359,7 @@ async def confirm_middle_pin(
     order: AdOrder,
     candidate: MiddlePinCandidate,
 ) -> None:
-    settings = get_settings()
+    bazaar_chat_id = await get_bazaar_chat_id(session)
     new_message_id = candidate.message_id
     replacing_existing = bool(order.pinned_message_id)
 
@@ -340,7 +377,7 @@ async def confirm_middle_pin(
         old_ids.add(order.pinned_message_id)
 
     await bot.pin_chat_message(
-        chat_id=settings.bazaar_chat_id,
+        chat_id=bazaar_chat_id,
         message_id=new_message_id,
         disable_notification=True,
     )
@@ -351,15 +388,15 @@ async def confirm_middle_pin(
         for _ in range(2):
             try:
                 await bot.unpin_chat_message(
-                    chat_id=settings.bazaar_chat_id,
+                    chat_id=bazaar_chat_id,
                     message_id=old_id,
                 )
                 break
             except Exception:
                 await asyncio.sleep(0.2)
 
-    # A newly confirmed Middle must be the newest visible pin. The Best post is
-    # not deleted; it will regain the top position on its next 3-hour publish.
+    # Middle is immediately on top. Active Best is returned automatically in
+    # about two minutes by publishing a fresh copy, not by reusing an old post.
     await suspend_best_pin_for_middle(session, bot)
 
     now = datetime.now(timezone.utc)
@@ -374,7 +411,7 @@ async def confirm_middle_pin(
     session.add(
         Publication(
             order_id=order.id,
-            chat_id=settings.bazaar_chat_id,
+            chat_id=bazaar_chat_id,
             message_id=new_message_id,
             kind=PublicationKind.MIDDLE_PIN.value,
             created_at=now,
@@ -391,7 +428,6 @@ async def capture_middle_pin(
     order: AdOrder,
     message: Message,
 ) -> None:
-    """Compatibility wrapper for older callers."""
     candidate = MiddlePinCandidate(
         order_id=order.id,
         chat_id=message.chat.id,
@@ -409,8 +445,24 @@ async def finish_order(
     *,
     status: str = OrderStatus.COMPLETED.value,
 ) -> None:
-    settings = get_settings()
-    await _unpin_message(bot, settings.bazaar_chat_id, order.pinned_message_id)
+    bazaar_chat_id = await get_bazaar_chat_id(session)
+
+    # Never trust only one saved ID. Unpin every publication belonging to the
+    # order so voluntary stop, admin stop and scheduled finish behave equally.
+    publications = (
+        await session.scalars(
+            select(Publication).where(
+                Publication.order_id == order.id,
+                Publication.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    pin_ids = {publication.message_id for publication in publications}
+    if order.pinned_message_id:
+        pin_ids.add(order.pinned_message_id)
+    for message_id in pin_ids:
+        await _unpin_message(bot, bazaar_chat_id, message_id)
+
     candidate = await session.get(MiddlePinCandidate, order.id)
     if candidate:
         await session.delete(candidate)
@@ -421,6 +473,8 @@ async def finish_order(
     order.updated_at = datetime.now(timezone.utc)
     await session.commit()
     await refresh_user_prefix(session, bot, order.user_id)
+    if order.tariff_code == TariffCode.BEST.value:
+        await refresh_bot_prefix(session, bot)
 
 
 async def publish_best_copy(
@@ -428,13 +482,11 @@ async def publish_best_copy(
     bot: Bot,
     order: AdOrder,
 ) -> list[Message]:
-    settings = get_settings()
+    bazaar_chat_id = await get_bazaar_chat_id(session)
     now = datetime.now(timezone.utc)
-    messages = await send_ad_content(bot, settings.bazaar_chat_id, order)
+    messages = await send_ad_content(bot, bazaar_chat_id, order)
     await _record_publications(session, order, messages, PublicationKind.COPY.value)
 
-    # Every scheduled Best copy becomes the newest/top pin. Existing Middle
-    # pins stay pinned; only the previous Best pin is removed.
     await pin_best_as_newest(session, bot, order, messages[0].message_id)
     order.next_publish_at = now + timedelta(hours=3)
     await session.flush()
