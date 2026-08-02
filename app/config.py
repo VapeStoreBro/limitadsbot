@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     bot_token: str = Field(alias="BOT_TOKEN")
     owner_id: int = Field(default=6577441312, alias="OWNER_ID")
     bazaar_chat_id: int = Field(default=-1003377593526, alias="BAZAAR_CHAT_ID")
+    bazaar_url: str = Field(default="https://t.me/bgghtrhrwbehtvrw", alias="BAZAAR_URL")
     staff_chat_id: int = Field(default=-5466156820, alias="STAFF_CHAT_ID")
     timezone: str = Field(default="Europe/Moscow", alias="TIMEZONE")
     database_url: str = Field(
