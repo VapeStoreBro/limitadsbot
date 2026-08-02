@@ -31,7 +31,9 @@ from app.handlers import (
     order_compose_v6,
     order_flow_v2,
     order_selection_v2,
+    payment_methods_v9,
     payments_v3,
+    revision_v9,
     single_actions_v6,
     single_screen_v6,
     submission_v5,
@@ -46,8 +48,9 @@ settings = get_settings()
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# The final routers own administrators, group settings, statistics and personal
-# pricing before compatibility handlers. Private navigation stays single-screen.
+# Final routers own payment selection, repeat moderation and one-screen navigation
+# before compatibility handlers. Old test-payment callbacks remain readable for
+# already opened messages, while new cards use Stars or manual card verification.
 dp.include_routers(
     entry_v3.router,
     common.router,
@@ -60,9 +63,11 @@ dp.include_routers(
     order_selection_v2.router,
     order_compose_v6.router,
     submission_v5.router,
+    revision_v9.router,
     order_flow_v2.router,
     best_edit_v5.router,
     best_buttons_v3.router,
+    payment_methods_v9.router,
     payments_v3.router,
     buyer_lifecycle_v5.router,
     buyer_ads_v3.router,
