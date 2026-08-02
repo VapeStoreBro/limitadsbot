@@ -4,14 +4,14 @@ from html import escape
 from aiogram import Bot, F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 from app.config import get_settings
 from app.db.session import SessionFactory
 from app.keyboards import membership_keyboard, phone_keyboard, profile_keyboard
 from app.models import User
 from app.services.blocking import get_user_block
-from app.services.price_card import ensure_main_menu_card
+from app.services.ui_screen import delete_user_input, render_user_screen
 from app.services.users import inspect_membership, is_admin, upsert_user
 
 router = Router(name="common")
@@ -33,30 +33,41 @@ def profile_caption(user: User, blocked_reason: str | None = None) -> str:
         f"Username: {username}\n"
         f"ID: <code>{user.id}</code>\n"
         f"Телефон: <code>{phone}</code>\n"
-        f"{access_line}"
+        f"{access_line}\n\n"
+        "<i>Все разделы открываются в этом сообщении. Новые меню бот больше не создаёт.</i>"
     )
 
 
-async def show_profile(bot: Bot, chat_id: int, user: User, admin: bool) -> None:
+async def show_profile(
+    bot: Bot,
+    chat_id: int,
+    user: User,
+    admin: bool,
+    *,
+    source_message: Message | None = None,
+) -> None:
     async with SessionFactory() as session:
         block = await get_user_block(session, user.id)
-    caption = profile_caption(user, block.reason if block else None)
-    keyboard = profile_keyboard(admin, blocked=bool(block and not admin))
-    menu_image = ensure_main_menu_card()
-    if menu_image:
-        await bot.send_photo(
-            chat_id,
-            FSInputFile(menu_image),
-            caption=caption,
-            reply_markup=keyboard,
-        )
-        return
-    await bot.send_message(chat_id, caption, reply_markup=keyboard)
+    await render_user_screen(
+        bot,
+        user.id,
+        profile_caption(user, block.reason if block else None),
+        profile_keyboard(admin, blocked=bool(block and not admin)),
+        source_message=source_message,
+        media_key="main",
+    )
 
 
-async def show_access_result(bot: Bot, chat_id: int, user: User, admin: bool) -> None:
+async def show_access_result(
+    bot: Bot,
+    chat_id: int,
+    user: User,
+    admin: bool,
+    *,
+    source_message: Message | None = None,
+) -> None:
     if admin:
-        await show_profile(bot, chat_id, user, True)
+        await show_profile(bot, chat_id, user, True, source_message=source_message)
         return
 
     result, status, error = await inspect_membership(bot, user.id)
@@ -71,18 +82,25 @@ async def show_access_result(bot: Bot, chat_id: int, user: User, admin: bool) ->
     if result == "member":
         user.is_bazaar_member = True
         user.bazaar_status = status
-        await show_profile(bot, chat_id, user, False)
+        await show_profile(bot, chat_id, user, False, source_message=source_message)
     elif result == "not_member":
-        await bot.send_message(
-            chat_id,
-            "<b>❌ Для покупки рекламы нужно вступить в группу</b>",
-            reply_markup=membership_keyboard(settings.bazaar_url),
+        await render_user_screen(
+            bot,
+            user.id,
+            "<b>❌ Для покупки рекламы нужно вступить в группу</b>\n\n"
+            "После вступления нажмите «Проверить снова».",
+            membership_keyboard(settings.bazaar_url),
+            source_message=source_message,
+            media_key="main",
         )
     else:
-        await bot.send_message(
-            chat_id,
+        await render_user_screen(
+            bot,
+            user.id,
             "<b>⚠️ Не удалось проверить участие</b>\n\nНажмите «Проверить снова».",
-            reply_markup=membership_keyboard(settings.bazaar_url),
+            membership_keyboard(settings.bazaar_url),
+            source_message=source_message,
+            media_key="main",
         )
         if error:
             try:
@@ -103,8 +121,8 @@ async def start(message: Message, bot: Bot) -> None:
         admin = await is_admin(session, user.id)
 
     if admin:
-        await message.answer("✅ Вход администратора", reply_markup=ReplyKeyboardRemove())
         await show_profile(bot, message.chat.id, user, True)
+        await delete_user_input(message)
         return
 
     if not user.phone:
@@ -114,8 +132,8 @@ async def start(message: Message, bot: Bot) -> None:
         )
         return
 
-    await message.answer("Проверяю доступ…", reply_markup=ReplyKeyboardRemove())
     await show_access_result(bot, message.chat.id, user, False)
+    await delete_user_input(message)
 
 
 @router.message(F.contact)
@@ -135,7 +153,7 @@ async def save_contact(message: Message, bot: Bot) -> None:
         await session.commit()
         admin = await is_admin(session, user.id)
 
-    await message.answer("✅", reply_markup=ReplyKeyboardRemove())
+    await delete_user_input(message)
     await show_access_result(bot, message.chat.id, user, admin)
 
 
@@ -147,8 +165,14 @@ async def recheck_membership(callback: CallbackQuery, bot: Bot) -> None:
     if not user:
         await callback.answer("Откройте бота заново.", show_alert=True)
         return
-    await callback.answer("Проверяю…")
-    await show_access_result(bot, callback.from_user.id, user, admin)
+    await show_access_result(
+        bot,
+        callback.from_user.id,
+        user,
+        admin,
+        source_message=callback.message,
+    )
+    await callback.answer("Проверено")
 
 
 @router.callback_query(F.data.in_({"profile:home", "nav:home", "order:cancel"}))
@@ -164,13 +188,14 @@ async def return_profile(
     if not user:
         await callback.answer("Откройте бота заново.", show_alert=True)
         return
-    await callback.answer("Главное меню")
-    await bot.send_message(
+    await show_profile(
+        bot,
         callback.from_user.id,
-        "Действие отменено. Возвращаю в главное меню.",
-        reply_markup=ReplyKeyboardRemove(),
+        user,
+        admin,
+        source_message=callback.message,
     )
-    await show_profile(bot, callback.from_user.id, user, admin)
+    await callback.answer("Главное меню")
 
 
 @router.callback_query(F.data == "blocked:info")
