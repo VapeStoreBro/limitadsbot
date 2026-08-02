@@ -1,15 +1,87 @@
 from datetime import datetime, timezone
+from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
+from app.config import get_settings
 from app.db.session import SessionFactory
-from app.keyboards import customer_menu
+from app.keyboards import membership_keyboard, phone_keyboard, profile_keyboard
 from app.models import User
-from app.services.users import is_admin, upsert_user
+from app.services.users import inspect_membership, is_admin, upsert_user
 
 router = Router(name="common")
+settings = get_settings()
+
+
+def profile_caption(user: User) -> str:
+    full_name = " ".join(part for part in [user.first_name, user.last_name] if part).strip()
+    username = f"@{escape(user.username)}" if user.username else "не указан"
+    phone = escape(user.phone or "не указан")
+    return (
+        "<b>👤 Профиль</b>\n\n"
+        f"Имя: <b>{escape(full_name or 'Без имени')}</b>\n"
+        f"Username: {username}\n"
+        f"ID: <code>{user.id}</code>\n"
+        f"Телефон: <code>{phone}</code>\n"
+        "Доступ: <b>✅ подтверждён</b>"
+    )
+
+
+async def show_profile(bot: Bot, chat_id: int, user: User, admin: bool) -> None:
+    caption = profile_caption(user)
+    keyboard = profile_keyboard(admin)
+    try:
+        photos = await bot.get_user_profile_photos(user.id, limit=1)
+        if photos.total_count and photos.photos:
+            await bot.send_photo(
+                chat_id,
+                photos.photos[0][-1].file_id,
+                caption=caption,
+                reply_markup=keyboard,
+            )
+            return
+    except Exception:
+        pass
+    await bot.send_message(chat_id, caption, reply_markup=keyboard)
+
+
+async def show_access_result(bot: Bot, chat_id: int, user: User, admin: bool) -> None:
+    if admin:
+        await show_profile(bot, chat_id, user, True)
+        return
+
+    result, status, error = await inspect_membership(bot, user.id)
+    async with SessionFactory() as session:
+        stored = await session.get(User, user.id)
+        if stored:
+            stored.is_bazaar_member = result == "member"
+            stored.bazaar_status = status
+            stored.last_seen_at = datetime.now(timezone.utc)
+            await session.commit()
+
+    if result == "member":
+        user.is_bazaar_member = True
+        user.bazaar_status = status
+        await show_profile(bot, chat_id, user, False)
+    elif result == "not_member":
+        await bot.send_message(
+            chat_id,
+            "❌ Для покупки рекламы нужно вступить в группу.",
+            reply_markup=membership_keyboard(settings.bazaar_url),
+        )
+    else:
+        await bot.send_message(
+            chat_id,
+            "⚠️ Не удалось проверить участие. Нажмите кнопку ещё раз.",
+            reply_markup=membership_keyboard(settings.bazaar_url),
+        )
+        if error:
+            await bot.send_message(
+                settings.staff_chat_id,
+                f"⚠️ Ошибка проверки участника <code>{user.id}</code>:\n<code>{escape(error)}</code>",
+            )
 
 
 @router.message(CommandStart())
@@ -19,42 +91,63 @@ async def start(message: Message, bot: Bot) -> None:
     async with SessionFactory() as session:
         user = await upsert_user(session, bot, message.from_user)
         admin = await is_admin(session, user.id)
-    membership = "✅ состоит в барахолке" if user.is_bazaar_member else "❌ не состоит в барахолке"
-    await message.answer(
-        "👋 Добро пожаловать в систему рекламы Limit Vape.\n\n"
-        f"Проверка аккаунта: {membership}.\n"
-        "Номер телефона можно передать добровольно, чтобы администрация могла помочь.",
-        reply_markup=customer_menu(admin),
-    )
+
+    if admin:
+        await message.answer("✅ Вход администратора", reply_markup=ReplyKeyboardRemove())
+        await show_profile(bot, message.chat.id, user, True)
+        return
+
+    if not user.phone:
+        await message.answer(
+            "📱 Отправьте номер телефона для продолжения.",
+            reply_markup=phone_keyboard(),
+        )
+        return
+
+    await message.answer("Проверяю доступ…", reply_markup=ReplyKeyboardRemove())
+    await show_access_result(bot, message.chat.id, user, False)
 
 
 @router.message(F.contact)
-async def save_contact(message: Message) -> None:
+async def save_contact(message: Message, bot: Bot) -> None:
     if not message.from_user or not message.contact:
         return
     if message.contact.user_id not in (None, message.from_user.id):
-        await message.answer("Можно отправить только собственный номер.")
+        await message.answer("Отправьте собственный номер кнопкой ниже.", reply_markup=phone_keyboard())
         return
+
     async with SessionFactory() as session:
         user = await session.get(User, message.from_user.id)
         if user is None:
-            await message.answer("Сначала нажмите /start.")
-            return
+            user = await upsert_user(session, bot, message.from_user)
         user.phone = message.contact.phone_number
         user.last_seen_at = datetime.now(timezone.utc)
         await session.commit()
-    await message.answer("✅ Номер сохранён и виден только администрации.")
+        admin = await is_admin(session, user.id)
+
+    await message.answer("✅", reply_markup=ReplyKeyboardRemove())
+    await show_access_result(bot, message.chat.id, user, admin)
 
 
-@router.message(F.text == "ℹ️ Тарифы")
-async def show_tariffs(message: Message) -> None:
-    await message.answer(
-        "<b>Standard</b> — публикации вручную, без активных ссылок и телефона.\n"
-        "500 ₽ день · 1000 ₽ неделя · 1500 ₽ месяц\n\n"
-        "<b>Middle</b> — публикации вручную, ссылки разрешены, один закреп и две замены. "
-        "Одновременно до трёх клиентов.\n"
-        "700 ₽ день · 1400 ₽ неделя · 2000 ₽ месяц\n\n"
-        "<b>Best</b> — один клиент, основной закреп и автопубликация каждые три часа. "
-        "Остаются последние три отправки, разрешено до двух кнопок.\n"
-        "1500 ₽ день · 2000 ₽ неделя · 2700 ₽ месяц"
-    )
+@router.callback_query(F.data == "profile:recheck")
+async def recheck_membership(callback: CallbackQuery, bot: Bot) -> None:
+    async with SessionFactory() as session:
+        user = await session.get(User, callback.from_user.id)
+        admin = await is_admin(session, callback.from_user.id)
+    if not user:
+        await callback.answer("Нажмите /start", show_alert=True)
+        return
+    await callback.answer("Проверяю…")
+    await show_access_result(bot, callback.from_user.id, user, admin)
+
+
+@router.callback_query(F.data == "profile:home")
+async def return_profile(callback: CallbackQuery, bot: Bot) -> None:
+    async with SessionFactory() as session:
+        user = await session.get(User, callback.from_user.id)
+        admin = await is_admin(session, callback.from_user.id)
+    if not user:
+        await callback.answer("Нажмите /start", show_alert=True)
+        return
+    await callback.answer()
+    await show_profile(bot, callback.from_user.id, user, admin)
