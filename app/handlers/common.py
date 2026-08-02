@@ -3,12 +3,13 @@ from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.filters import CommandStart
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemove
 
 from app.config import get_settings
 from app.db.session import SessionFactory
 from app.keyboards import membership_keyboard, phone_keyboard, profile_keyboard
 from app.models import User
+from app.services.price_card import ensure_main_menu_card
 from app.services.users import inspect_membership, is_admin, upsert_user
 
 router = Router(name="common")
@@ -32,18 +33,15 @@ def profile_caption(user: User) -> str:
 async def show_profile(bot: Bot, chat_id: int, user: User, admin: bool) -> None:
     caption = profile_caption(user)
     keyboard = profile_keyboard(admin)
-    try:
-        photos = await bot.get_user_profile_photos(user.id, limit=1)
-        if photos.total_count and photos.photos:
-            await bot.send_photo(
-                chat_id,
-                photos.photos[0][-1].file_id,
-                caption=caption,
-                reply_markup=keyboard,
-            )
-            return
-    except Exception:
-        pass
+    menu_image = ensure_main_menu_card()
+    if menu_image:
+        await bot.send_photo(
+            chat_id,
+            FSInputFile(menu_image),
+            caption=caption,
+            reply_markup=keyboard,
+        )
+        return
     await bot.send_message(chat_id, caption, reply_markup=keyboard)
 
 
