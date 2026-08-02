@@ -16,7 +16,7 @@ CAPACITY = {
     TariffCode.MIDDLE.value: 3,
     TariffCode.BEST.value: 1,
 }
-OFFER_LIFETIME = timedelta(hours=1)
+OFFER_LIFETIME = timedelta(hours=24)
 
 
 async def _reserved_count(
@@ -118,7 +118,7 @@ async def promote_waiting_bookings(
                 bot,
                 order.user_id,
                 f"<b>🔥 Освободилось место для рекламы №{order.id}</b>\n\n"
-                "Бот удерживает его один час. Доплатите остаток кнопкой в карточке заказа, "
+                "Бот удерживает его 24 часа. Доплатите остаток кнопкой в карточке заказа, "
                 "и реклама запустится сразу.",
             )
             available -= 1
@@ -157,8 +157,8 @@ async def expire_booking_offers(session: AsyncSession, bot: Bot) -> None:
         await send_ephemeral_notice(
             bot,
             order.user_id,
-            f"<b>⌛ Предложение по рекламе №{order.id} истекло</b>\n\n"
-            "Место передано следующему в очереди.",
+            f"<b>⌛ Срок доплаты по рекламе №{order.id} истёк</b>\n\n"
+            "За 24 часа остаток не был внесён, поэтому место передано следующему в очереди.",
         )
 
     for tariff in affected_tariffs:
