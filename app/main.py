@@ -16,6 +16,7 @@ from app.handlers import (
     admin_orders_v4,
     admin_pages_v4,
     admin_panel_v3,
+    admin_runtime_fix_v8,
     best_buttons_v3,
     best_edit_v5,
     buyer_ads_v3,
@@ -44,11 +45,12 @@ settings = get_settings()
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# The final router owns administrators, group settings, statistics and personal
+# The final routers own administrators, group settings, statistics and personal
 # pricing before compatibility handlers. Private navigation stays single-screen.
 dp.include_routers(
     entry_v3.router,
     common.router,
+    admin_runtime_fix_v8.router,
     admin_final_v7.router,
     single_screen_v6.router,
     single_actions_v6.router,
