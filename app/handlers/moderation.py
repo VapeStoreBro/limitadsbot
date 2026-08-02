@@ -7,12 +7,12 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.db.session import SessionFactory
 from app.enums import OrderStatus, TariffCode
-from app.keyboards import moderation_keyboard, test_payment_keyboard
-from app.keyboards_v3 import home_keyboard, moderation_reason_keyboard
-from app.models import AdOrder
+from app.keyboards import moderation_keyboard
+from app.keyboards_v3 import moderation_reason_keyboard
+from app.models import AdOrder, MiddlePinCandidate
+from app.models_extra import OrderDecision
 from app.services.app_settings import get_staff_chat_id
-from app.services.orders import deposit_amount
-from app.services.telegram_ads import capture_middle_pin
+from app.services.order_cards import update_buyer_card, update_staff_card
 
 router = Router(name="moderation")
 settings = get_settings()
@@ -37,6 +37,32 @@ async def is_staff_callback(callback: CallbackQuery) -> bool:
     return callback.message.chat.id == staff_chat_id
 
 
+async def save_decision(
+    session,
+    order_id: int,
+    action: str,
+    comment: str,
+    actor_id: int,
+) -> None:
+    now = datetime.now(timezone.utc)
+    row = await session.get(OrderDecision, order_id)
+    if row is None:
+        session.add(
+            OrderDecision(
+                order_id=order_id,
+                action=action,
+                comment=comment,
+                decided_by=actor_id,
+                decided_at=now,
+            )
+        )
+    else:
+        row.action = action
+        row.comment = comment
+        row.decided_by = actor_id
+        row.decided_at = now
+
+
 @router.callback_query(F.data.startswith("mod:"))
 async def moderation_action(callback: CallbackQuery, bot: Bot) -> None:
     if not await is_staff_callback(callback):
@@ -45,26 +71,20 @@ async def moderation_action(callback: CallbackQuery, bot: Bot) -> None:
 
     _, action, raw_id = callback.data.split(":", 2)
     if action not in {"approve", "revision", "reject"}:
-        await callback.answer(
-            "В группе состава доступны только одобрение, исправление и отклонение.",
-            show_alert=True,
-        )
+        await callback.answer("В группе состава доступны только три решения.", show_alert=True)
         return
 
     order_id = int(raw_id)
     if action in {"revision", "reject"}:
         async with SessionFactory() as session:
             order = await session.get(AdOrder, order_id)
-            if not order:
-                await callback.answer("Заказ не найден.", show_alert=True)
-                return
-            if order.status != OrderStatus.MODERATION.value:
-                await callback.answer("Заявку уже обработали.", show_alert=True)
+            if not order or order.status != OrderStatus.MODERATION.value:
+                await callback.answer("Заявку уже обработали или она не найдена.", show_alert=True)
                 return
         title = "Причина возврата на исправление" if action == "revision" else "Причина отклонения"
         await callback.message.edit_text(
             f"<b>{title} · заявка №{order_id}</b>\n\n"
-            "Выберите короткий комментарий — покупатель получит его вместе с решением.",
+            "Выберите комментарий для покупателя.",
             reply_markup=moderation_reason_keyboard(action, order_id),
         )
         await callback.answer("Выберите причину")
@@ -73,44 +93,35 @@ async def moderation_action(callback: CallbackQuery, bot: Bot) -> None:
     now = datetime.now(timezone.utc)
     async with SessionFactory() as session:
         order = await session.get(AdOrder, order_id)
-        if not order:
-            await callback.answer("Заказ не найден.", show_alert=True)
+        if not order or order.status != OrderStatus.MODERATION.value:
+            await callback.answer("Заявку уже обработали или она не найдена.", show_alert=True)
             return
-        if order.status != OrderStatus.MODERATION.value:
-            await callback.answer("Заявку уже обработали.", show_alert=True)
-            return
-
         order.moderated_by = callback.from_user.id
         order.moderated_at = now
         order.updated_at = now
-        if order.requested_start_at:
-            order.status = OrderStatus.AWAITING_DEPOSIT.value
-            amount = deposit_amount(order.price_rub)
-            kind = "deposit"
-            text = (
-                f"<b>✅ Заявка №{order.id} одобрена</b>\n\n"
-                f"Для бронирования внесите тестовую предоплату <b>{amount} ₽</b>."
-            )
-        else:
-            order.status = OrderStatus.AWAITING_PAYMENT.value
-            amount = order.price_rub
-            kind = "full"
-            text = (
-                f"<b>✅ Заявка №{order.id} одобрена</b>\n\n"
-                f"Для продолжения внесите тестовую оплату <b>{amount} ₽</b>."
-            )
-        await session.commit()
-        await bot.send_message(
-            order.user_id,
-            text,
-            reply_markup=test_payment_keyboard(order.id, kind, amount),
+        order.status = (
+            OrderStatus.AWAITING_DEPOSIT.value
+            if order.requested_start_at
+            else OrderStatus.AWAITING_PAYMENT.value
         )
-
-    await callback.message.edit_text(
-        f"✅ Заявка №{order_id} одобрена.\n"
-        f"Решение: <b>{callback.from_user.full_name}</b>."
-    )
-    await callback.answer("Готово")
+        await save_decision(
+            session,
+            order.id,
+            "approve",
+            "Заявка одобрена администрацией.",
+            callback.from_user.id,
+        )
+        await session.commit()
+        await update_buyer_card(session, bot, order)
+        await update_staff_card(
+            session,
+            bot,
+            order,
+            f"<b>✅ Заявка №{order.id} одобрена</b>\n"
+            f"Решение: <b>{callback.from_user.full_name}</b>.\n"
+            "Карточка покупателя обновлена, после полной оплаты реклама запустится автоматически.",
+        )
+    await callback.answer("Одобрено")
 
 
 @router.callback_query(F.data.startswith("modreason:"))
@@ -123,26 +134,21 @@ async def moderation_reason(callback: CallbackQuery, bot: Bot) -> None:
 
     if action == "back":
         await callback.message.edit_text(
-            f"<b>Решение по заявке №{order_id}</b>\n"
-            "Проверьте пост и выберите действие.",
+            f"<b>Решение по заявке №{order_id}</b>\nПроверьте пост и выберите действие.",
             reply_markup=moderation_keyboard(order_id),
         )
         await callback.answer()
         return
-
     if action not in {"revision", "reject"}:
         await callback.answer("Неизвестное решение.", show_alert=True)
         return
 
-    now = datetime.now(timezone.utc)
     reason = REASON_TEXTS.get(reason_code, REASON_TEXTS["none"])
+    now = datetime.now(timezone.utc)
     async with SessionFactory() as session:
         order = await session.get(AdOrder, order_id)
-        if not order:
-            await callback.answer("Заказ не найден.", show_alert=True)
-            return
-        if order.status != OrderStatus.MODERATION.value:
-            await callback.answer("Заявку уже обработали.", show_alert=True)
+        if not order or order.status != OrderStatus.MODERATION.value:
+            await callback.answer("Заявку уже обработали или она не найдена.", show_alert=True)
             return
         order.status = (
             OrderStatus.REVISION.value if action == "revision" else OrderStatus.REJECTED.value
@@ -150,34 +156,36 @@ async def moderation_reason(callback: CallbackQuery, bot: Bot) -> None:
         order.moderated_by = callback.from_user.id
         order.moderated_at = now
         order.updated_at = now
+        await save_decision(session, order.id, action, reason, callback.from_user.id)
         await session.commit()
-
-    if action == "revision":
-        buyer_text = (
-            f"<b>✏️ Заявка №{order_id} возвращена на исправление</b>\n\n"
-            f"Комментарий администрации: <b>{reason}</b>\n\n"
-            "Исправьте материал и оформите заявку заново."
+        await update_buyer_card(session, bot, order)
+        result = "возвращена на исправление" if action == "revision" else "отклонена"
+        await update_staff_card(
+            session,
+            bot,
+            order,
+            f"<b>Заявка №{order.id} {result}</b>\n"
+            f"Комментарий: <b>{reason}</b>\n"
+            f"Решение: <b>{callback.from_user.full_name}</b>.",
         )
-        result = "возвращена на исправление"
-    else:
-        buyer_text = (
-            f"<b>❌ Заявка №{order_id} отклонена</b>\n\n"
-            f"Комментарий администрации: <b>{reason}</b>"
-        )
-        result = "отклонена"
+    await callback.answer("Карточка покупателя обновлена")
 
-    await bot.send_message(order.user_id, buyer_text, reply_markup=home_keyboard())
-    await callback.message.edit_text(
-        f"Заявка №{order_id} {result}.\n"
-        f"Комментарий: <b>{reason}</b>\n"
-        f"Решение: <b>{callback.from_user.full_name}</b>."
-    )
-    await callback.answer("Решение отправлено покупателю")
+
+def looks_like_ad_post(message: Message) -> bool:
+    if message.reply_to_message or message.text and message.text.startswith("/"):
+        return False
+    text = (message.caption or message.text or "").strip()
+    entity_types = {
+        getattr(entity.type, "value", str(entity.type))
+        for entity in (message.caption_entities or message.entities or [])
+    }
+    has_link = bool(entity_types.intersection({"url", "text_link"}))
+    return bool(message.photo or len(text) >= 30 or has_link)
 
 
 @router.message(F.chat.id == settings.bazaar_chat_id)
 async def bazaar_messages(message: Message, bot: Bot) -> None:
-    if not message.from_user:
+    if not message.from_user or not looks_like_ad_post(message):
         return
     async with SessionFactory() as session:
         order = await session.scalar(
@@ -190,12 +198,30 @@ async def bazaar_messages(message: Message, bot: Bot) -> None:
             )
             .order_by(AdOrder.updated_at.desc(), AdOrder.id.desc())
         )
-        if order:
-            await capture_middle_pin(session, bot, order, message)
-            remaining = max(0, 2 - order.pin_changes_used)
-            await bot.send_message(
-                order.user_id,
-                f"<b>📌 Закреп установлен</b>\n\n"
-                f"Заказ №{order.id}. Осталось замен: <b>{remaining}</b>.",
-                reply_markup=home_keyboard(),
+        if not order:
+            return
+
+        existing = await session.get(MiddlePinCandidate, order.id)
+        text = (message.caption or message.text or "").strip()
+        if existing and message.media_group_id and not text:
+            return
+        preview = text[:250] if text else "Фотография без подписи"
+        now = datetime.now(timezone.utc)
+        if existing is None:
+            session.add(
+                MiddlePinCandidate(
+                    order_id=order.id,
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    preview_text=preview,
+                    created_at=now,
+                )
             )
+        else:
+            existing.chat_id = message.chat.id
+            existing.message_id = message.message_id
+            existing.preview_text = preview
+            existing.created_at = now
+        order.updated_at = now
+        await session.commit()
+        await update_buyer_card(session, bot, order)
