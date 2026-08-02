@@ -7,6 +7,10 @@ from app.db.session import SessionFactory, engine
 from app.enums import DurationCode, TariffCode
 from app.models import Admin, AppSetting, Base, TariffPrice, User
 from app.models_extra import OrderDecision  # noqa: F401 - registers table metadata
+from app.payment_models import (  # noqa: F401 - registers payment tables
+    PaymentTransaction,
+    PaymentWebhookEvent,
+)
 
 DEFAULT_PRICES = {
     (TariffCode.STANDARD, DurationCode.DAY): (500, 24),
