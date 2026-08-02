@@ -40,13 +40,21 @@ async def create_transaction(
 ) -> PaymentTransaction:
     """Create or reuse one unfinished operation for the same payment step."""
 
+    # Serialize checkout creation on the order row. This protects real payment
+    # buttons even when several bot/webhook workers are running.
+    locked_order = await session.scalar(
+        select(AdOrder).where(AdOrder.id == order.id).with_for_update()
+    )
+    if not locked_order or locked_order.user_id != order.user_id:
+        raise LookupError("Order for payment transaction not found")
+
     amount_minor = rubles_to_minor(amount_rub)
     now = datetime.now(timezone.utc)
     existing = await session.scalar(
         select(PaymentTransaction)
         .where(
-            PaymentTransaction.order_id == order.id,
-            PaymentTransaction.user_id == order.user_id,
+            PaymentTransaction.order_id == locked_order.id,
+            PaymentTransaction.user_id == locked_order.user_id,
             PaymentTransaction.provider == provider,
             PaymentTransaction.kind == kind,
             PaymentTransaction.amount_minor == amount_minor,
@@ -56,11 +64,14 @@ async def create_transaction(
     )
     if existing and (existing.expires_at is None or existing.expires_at > now):
         return existing
+    if existing:
+        existing.status = "expired"
+        existing.updated_at = now
 
     transaction = PaymentTransaction(
         transaction_id=str(uuid4()),
-        order_id=order.id,
-        user_id=order.user_id,
+        order_id=locked_order.id,
+        user_id=locked_order.user_id,
         provider=provider,
         kind=kind,
         amount_minor=amount_minor,
