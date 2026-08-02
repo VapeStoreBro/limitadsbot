@@ -104,7 +104,7 @@ async def promote_waiting_bookings(
 
             expires = now + OFFER_LIFETIME
             order.remaining_due_at = expires
-            order.payment_reminder_sent = True
+            order.payment_reminder_sent = False
             session.add(
                 BookingOffer(
                     order_id=order.id,
@@ -118,14 +118,14 @@ async def promote_waiting_bookings(
                 bot,
                 order.user_id,
                 f"<b>🔥 Освободилось место для рекламы №{order.id}</b>\n\n"
-                "Бот удерживает его 24 часа. Доплатите остаток кнопкой в карточке заказа, "
-                "и реклама запустится сразу.",
+                "Именно сейчас начался срок на внесение остатка: <b>24 часа</b>. "
+                "Доплатите кнопкой в карточке заказа, и реклама запустится сразу.",
             )
             available -= 1
 
 
 async def expire_booking_offers(session: AsyncSession, bot: Bot) -> None:
-    """Release unpaid early-start offers and immediately pass the slot onward."""
+    """Release unpaid final-payment offers and pass the slot onward."""
     now = datetime.now(timezone.utc)
     offers = (
         await session.scalars(
@@ -158,7 +158,8 @@ async def expire_booking_offers(session: AsyncSession, bot: Bot) -> None:
             bot,
             order.user_id,
             f"<b>⌛ Срок доплаты по рекламе №{order.id} истёк</b>\n\n"
-            "За 24 часа остаток не был внесён, поэтому место передано следующему в очереди.",
+            "После предложения готового места прошло 24 часа, поэтому оно передано "
+            "следующему в очереди.",
         )
 
     for tariff in affected_tariffs:
