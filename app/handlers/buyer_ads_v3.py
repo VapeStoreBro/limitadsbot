@@ -40,28 +40,36 @@ def order_text(order: AdOrder) -> str:
     local_zone = ZoneInfo(settings.timezone)
     start = order.activated_at.astimezone(local_zone) if order.activated_at else None
     end = order.ends_at.astimezone(local_zone) if order.ends_at else None
-    pin_line = ""
+    lines = [
+        f"<b><u>📦 РЕКЛАМА №{order.id}</u></b>",
+        "",
+        f"├ Статус: <b>{STATUS_LABELS.get(order.status, escape(order.status))}</b>",
+        f"├ Тариф: <b>{TARIFF_NAMES.get(order.tariff_code, order.tariff_code)}</b>",
+        f"├ Срок: <b>{DURATION_NAMES.get(order.duration_code, order.duration_code)}</b>",
+        f"├ Стоимость: <b>{order.price_rub} ₽</b>",
+        f"├ Оплачено: <b>{order.paid_rub} ₽</b>",
+    ]
     if order.tariff_code == TariffCode.MIDDLE.value:
         if order.awaiting_middle_pin and order.pinned_message_id:
-            pin_line = "\n├ Закреп: <b>ожидается новое сообщение</b>"
+            lines.append("├ Закреп: <b>ожидается новое сообщение</b>")
         elif order.awaiting_middle_pin:
-            pin_line = "\n├ Закреп: <b>отправьте первый пост в барахолку</b>"
+            lines.append("├ Закреп: <b>отправьте первый пост в барахолку</b>")
         elif order.pinned_message_id:
-            pin_line = "\n├ Закреп: <b>установлен</b>"
-        pin_line += f"\n├ Заменено: <b>{order.pin_changes_used}/2</b>"
-
-    return (
-        f"<b><u>📦 РЕКЛАМА №{order.id}</u></b>\n\n"
-        f"├ Статус: <b>{STATUS_LABELS.get(order.status, escape(order.status))}</b>\n"
-        f"├ Тариф: <b>{TARIFF_NAMES.get(order.tariff_code, order.tariff_code)}</b>\n"
-        f"├ Срок: <b>{DURATION_NAMES.get(order.duration_code, order.duration_code)}</b>\n"
-        f"├ Стоимость: <b>{order.price_rub} ₽</b>\n"
-        f"├ Оплачено: <b>{order.paid_rub} ₽</b>"
-        f"{pin_line}\n"
-        f"├ Запуск: <code>{start:%d.%m.%Y %H:%M}</code>\n" if start else ""
-    ) + (
-        f"└ Окончание: <code>{end:%d.%m.%Y %H:%M}</code>" if end else "└ Окончание: ещё не запущена"
+            lines.append("├ Закреп: <b>установлен</b>")
+        else:
+            lines.append("├ Закреп: <b>не установлен</b>")
+        lines.append(f"├ Заменено: <b>{order.pin_changes_used}/2</b>")
+    lines.append(
+        f"├ Запуск: <code>{start:%d.%m.%Y %H:%M}</code>"
+        if start
+        else "├ Запуск: ещё не запущена"
     )
+    lines.append(
+        f"└ Окончание: <code>{end:%d.%m.%Y %H:%M}</code>"
+        if end
+        else "└ Окончание: ещё не запущена"
+    )
+    return "\n".join(lines)
 
 
 async def get_owned_order(user_id: int, order_id: int) -> AdOrder | None:
