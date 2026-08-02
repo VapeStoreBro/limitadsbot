@@ -118,6 +118,39 @@ class AdOrder(Base):
     payments: Mapped[list[Payment]] = relationship(back_populates="order")
 
 
+class OrderCard(Base):
+    __tablename__ = "order_cards"
+    __table_args__ = (UniqueConstraint("order_id", "kind", "chat_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(Integer, ForeignKey("ad_orders.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(24), index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class OrderNotice(Base):
+    __tablename__ = "order_notices"
+    __table_args__ = (UniqueConstraint("order_id", "code"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(Integer, ForeignKey("ad_orders.id"), index=True)
+    code: Mapped[str] = mapped_column(String(32), index=True)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class MiddlePinCandidate(Base):
+    __tablename__ = "middle_pin_candidates"
+
+    order_id: Mapped[int] = mapped_column(Integer, ForeignKey("ad_orders.id"), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    preview_text: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Publication(Base):
     __tablename__ = "publications"
 

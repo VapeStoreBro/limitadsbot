@@ -1,23 +1,28 @@
 import asyncio
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
 from sqlalchemy import select
 
-from app.config import get_settings
 from app.db.session import SessionFactory
 from app.enums import OrderStatus, TariffCode
-from app.keyboards_v3 import home_keyboard, private_activation_keyboard
 from app.models import AdOrder, UserBlock
-from app.services.telegram_ads import finish_order, publish_best_copy
+from app.services.lifecycle import (
+    audit_advertising_prefixes,
+    auto_activate_paid_order,
+    complete_order,
+    send_three_day_warning,
+)
+from app.services.order_cards import update_buyer_card
+from app.services.telegram_ads import publish_best_copy
 
 
 class OrderScheduler:
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
-        self.settings = get_settings()
         self._task: asyncio.Task | None = None
+        self._last_prefix_audit: datetime | None = None
 
     def start(self) -> None:
         if self._task is None:
@@ -36,34 +41,34 @@ class OrderScheduler:
                 await self.tick()
             except Exception:
                 pass
-            await asyncio.sleep(20)
+            await asyncio.sleep(60)
 
     async def tick(self) -> None:
         now = datetime.now(timezone.utc)
         async with SessionFactory() as session:
-            active = (
+            ready = (
                 await session.scalars(
                     select(AdOrder).where(
-                        AdOrder.status == OrderStatus.ACTIVE.value
+                        AdOrder.status == OrderStatus.READY.value,
+                        AdOrder.paid_rub >= AdOrder.price_rub,
                     )
+                )
+            ).all()
+            for order in ready:
+                await auto_activate_paid_order(session, self.bot, order)
+
+            active = (
+                await session.scalars(
+                    select(AdOrder).where(AdOrder.status == OrderStatus.ACTIVE.value)
                 )
             ).all()
             for order in active:
                 if await session.get(UserBlock, order.user_id):
-                    await finish_order(
-                        session,
-                        self.bot,
-                        order,
-                        status=OrderStatus.CANCELLED.value,
-                    )
+                    await complete_order(session, self.bot, order, cancelled=True)
                     continue
+                await send_three_day_warning(session, self.bot, order)
                 if order.ends_at and order.ends_at <= now:
-                    await finish_order(session, self.bot, order)
-                    await self.bot.send_message(
-                        order.user_id,
-                        f"<b>✅ Реклама по заказу №{order.id} завершена</b>",
-                        reply_markup=home_keyboard(),
-                    )
+                    await complete_order(session, self.bot, order)
                     continue
                 if (
                     order.tariff_code == TariffCode.BEST.value
@@ -71,46 +76,45 @@ class OrderScheduler:
                     and order.next_publish_at <= now
                 ):
                     await publish_best_copy(session, self.bot, order)
+                    await update_buyer_card(session, self.bot, order)
 
             booked = (
                 await session.scalars(
-                    select(AdOrder).where(
-                        AdOrder.status == OrderStatus.BOOKED.value
-                    )
+                    select(AdOrder).where(OrderStatus.BOOKED.value == AdOrder.status)
                 )
             ).all()
             for order in booked:
                 if await session.get(UserBlock, order.user_id):
-                    order.status = OrderStatus.CANCELLED.value
-                    order.updated_at = now
+                    await complete_order(session, self.bot, order, cancelled=True)
                     continue
                 if (
                     order.remaining_due_at
                     and order.remaining_due_at <= now
+                    and order.paid_rub < order.price_rub
                     and not order.payment_reminder_sent
                 ):
                     remaining = max(0, order.price_rub - order.paid_rub)
                     await self.bot.send_message(
                         order.user_id,
                         f"<b>⏰ По брони №{order.id} пора доплатить {remaining} ₽</b>",
-                        reply_markup=home_keyboard(),
                     )
                     order.payment_reminder_sent = True
+                    order.updated_at = now
+                    await session.commit()
+                    await update_buyer_card(session, self.bot, order)
+
                 if order.requested_start_at and order.requested_start_at <= now:
                     if order.paid_rub >= order.price_rub:
                         order.status = OrderStatus.READY.value
-                        await self.bot.send_message(
-                            self.settings.owner_id,
-                            f"🚀 Бронь №{order.id} полностью оплачена и готова к запуску.",
-                            reply_markup=private_activation_keyboard(order.id),
-                        )
+                        order.updated_at = now
+                        await session.commit()
+                        await auto_activate_paid_order(session, self.bot, order)
                     else:
-                        order.status = OrderStatus.CANCELLED.value
-                        await self.bot.send_message(
-                            order.user_id,
-                            f"<b>❌ Бронь №{order.id} отменена</b>\n\n"
-                            "Остаток не был оплачен вовремя.",
-                            reply_markup=home_keyboard(),
-                        )
-                    order.updated_at = now
-            await session.commit()
+                        await complete_order(session, self.bot, order, cancelled=True)
+
+            if (
+                self._last_prefix_audit is None
+                or now - self._last_prefix_audit >= timedelta(minutes=15)
+            ):
+                await audit_advertising_prefixes(session, self.bot)
+                self._last_prefix_audit = now

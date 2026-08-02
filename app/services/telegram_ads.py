@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
@@ -8,18 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.enums import OrderStatus, PublicationKind, TariffCode
 from app.keyboards import best_buttons
-from app.models import AdOrder, Publication
+from app.models import AdOrder, MiddlePinCandidate, Publication
 from app.rules import advertising_prefix
 
 
 async def send_ad_content(bot: Bot, chat_id: int, order: AdOrder) -> list[Message]:
-    """Send one advertisement.
-
-    When Best contains several photos and buttons, the first photo becomes the
-    main post: it contains the complete caption and inline buttons. The other
-    photos follow after it. This lets Telegram pin the actual advertising post
-    with its buttons instead of a separate technical message.
-    """
     keyboard = best_buttons(order.buttons)
     media = list(order.media or [])
     text = order.content_text or ""
@@ -88,10 +82,29 @@ async def refresh_user_prefix(session: AsyncSession, bot: Bot, user_id: int) -> 
         )
     ).all()
     if not active:
+        try:
+            await bot.promote_chat_member(
+                settings.bazaar_chat_id,
+                user_id,
+                can_manage_chat=False,
+                can_delete_messages=False,
+                can_manage_video_chats=False,
+                can_restrict_members=False,
+                can_promote_members=False,
+                can_change_info=False,
+                can_invite_users=False,
+                can_pin_messages=False,
+            )
+        except Exception:
+            pass
+        return
+
+    furthest_end = max(order.ends_at for order in active if order.ends_at is not None)
+    try:
         await bot.promote_chat_member(
             settings.bazaar_chat_id,
             user_id,
-            can_manage_chat=False,
+            can_manage_chat=True,
             can_delete_messages=False,
             can_manage_video_chats=False,
             can_restrict_members=False,
@@ -100,47 +113,57 @@ async def refresh_user_prefix(session: AsyncSession, bot: Bot, user_id: int) -> 
             can_invite_users=False,
             can_pin_messages=False,
         )
-        return
+        await bot.set_chat_administrator_custom_title(
+            settings.bazaar_chat_id,
+            user_id,
+            advertising_prefix(furthest_end, settings.timezone),
+        )
+    except Exception:
+        pass
 
-    furthest_end = max(order.ends_at for order in active if order.ends_at is not None)
-    await bot.promote_chat_member(
-        settings.bazaar_chat_id,
-        user_id,
-        can_manage_chat=True,
-        can_delete_messages=False,
-        can_manage_video_chats=False,
-        can_restrict_members=False,
-        can_promote_members=False,
-        can_change_info=False,
-        can_invite_users=False,
-        can_pin_messages=False,
-    )
-    await bot.set_chat_administrator_custom_title(
-        settings.bazaar_chat_id,
-        user_id,
-        advertising_prefix(furthest_end, settings.timezone),
-    )
+
+async def _record_publications(
+    session: AsyncSession,
+    order: AdOrder,
+    messages: list[Message],
+    kind: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    for message in messages:
+        session.add(
+            Publication(
+                order_id=order.id,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                kind=kind,
+                created_at=now,
+                deleted_at=None,
+            )
+        )
 
 
 async def activate_order(
     session: AsyncSession,
     bot: Bot,
     order: AdOrder,
-    actor_id: int,
-) -> None:
+    actor_id: int = 0,
+) -> bool:
+    """Activate once. Repeated calls are safe and never reset the timer."""
     settings = get_settings()
-    now = datetime.now(timezone.utc)
-    order.status = OrderStatus.ACTIVE.value
-    order.activated_by = actor_id
-    order.activated_at = now
-    order.ends_at = now + timedelta(hours=order.duration_hours)
-    order.requested_start_at = now
-    order.requested_end_at = order.ends_at
-    order.updated_at = now
+    if order.status == OrderStatus.ACTIVE.value:
+        return True
+    if order.paid_rub < order.price_rub:
+        return False
 
-    if order.tariff_code == TariffCode.MIDDLE.value:
-        order.awaiting_middle_pin = True
-    elif order.tariff_code == TariffCode.BEST.value:
+    now = datetime.now(timezone.utc)
+    if order.requested_start_at and order.requested_start_at > now:
+        order.status = OrderStatus.BOOKED.value
+        order.updated_at = now
+        await session.commit()
+        return False
+
+    messages: list[Message] = []
+    if order.tariff_code == TariffCode.BEST.value:
         messages = await send_ad_content(bot, settings.bazaar_chat_id, order)
         main = messages[0]
         await bot.pin_chat_message(
@@ -150,20 +173,141 @@ async def activate_order(
         )
         order.pinned_message_id = main.message_id
         order.next_publish_at = now + timedelta(hours=3)
-        for message in messages:
-            session.add(
-                Publication(
-                    order_id=order.id,
-                    chat_id=settings.bazaar_chat_id,
-                    message_id=message.message_id,
-                    kind=PublicationKind.MAIN.value,
-                    created_at=now,
-                    deleted_at=None,
-                )
-            )
+        await _record_publications(session, order, messages, PublicationKind.MAIN.value)
+    elif order.tariff_code == TariffCode.MIDDLE.value:
+        order.awaiting_middle_pin = True
 
+    order.status = OrderStatus.ACTIVE.value
+    order.activated_by = actor_id or order.moderated_by or 0
+    order.activated_at = now
+    order.ends_at = now + timedelta(hours=order.duration_hours)
+    order.requested_start_at = now
+    order.requested_end_at = order.ends_at
+    order.updated_at = now
     await session.commit()
     await refresh_user_prefix(session, bot, order.user_id)
+    return True
+
+
+async def replace_best_publication(
+    session: AsyncSession,
+    bot: Bot,
+    order: AdOrder,
+) -> None:
+    """Publish the edited Best post, pin it, then remove the previous main post."""
+    if order.tariff_code != TariffCode.BEST.value or order.status != OrderStatus.ACTIVE.value:
+        await session.commit()
+        return
+
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    old_main = (
+        await session.scalars(
+            select(Publication).where(
+                Publication.order_id == order.id,
+                Publication.kind == PublicationKind.MAIN.value,
+                Publication.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    old_ids = {publication.message_id for publication in old_main}
+    if order.pinned_message_id:
+        old_ids.add(order.pinned_message_id)
+
+    messages = await send_ad_content(bot, settings.bazaar_chat_id, order)
+    new_main = messages[0]
+    await bot.pin_chat_message(
+        settings.bazaar_chat_id,
+        new_main.message_id,
+        disable_notification=True,
+    )
+
+    for old_id in old_ids:
+        if old_id == new_main.message_id:
+            continue
+        try:
+            await bot.unpin_chat_message(
+                chat_id=settings.bazaar_chat_id,
+                message_id=old_id,
+            )
+        except Exception:
+            pass
+        try:
+            await bot.delete_message(settings.bazaar_chat_id, old_id)
+        except Exception:
+            pass
+
+    for publication in old_main:
+        publication.deleted_at = now
+    await _record_publications(session, order, messages, PublicationKind.MAIN.value)
+    order.pinned_message_id = new_main.message_id
+    order.updated_at = now
+    await session.commit()
+
+
+async def confirm_middle_pin(
+    session: AsyncSession,
+    bot: Bot,
+    order: AdOrder,
+    candidate: MiddlePinCandidate,
+) -> None:
+    settings = get_settings()
+    new_message_id = candidate.message_id
+    replacing_existing = bool(order.pinned_message_id)
+
+    await bot.pin_chat_message(
+        chat_id=settings.bazaar_chat_id,
+        message_id=new_message_id,
+        disable_notification=True,
+    )
+
+    previous = (
+        await session.scalars(
+            select(Publication).where(
+                Publication.order_id == order.id,
+                Publication.kind == PublicationKind.MIDDLE_PIN.value,
+                Publication.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    old_ids = {publication.message_id for publication in previous}
+    if order.pinned_message_id:
+        old_ids.add(order.pinned_message_id)
+
+    for old_id in old_ids:
+        if old_id == new_message_id:
+            continue
+        for _ in range(2):
+            try:
+                await bot.unpin_chat_message(
+                    chat_id=settings.bazaar_chat_id,
+                    message_id=old_id,
+                )
+                break
+            except Exception:
+                await asyncio.sleep(0.2)
+
+    now = datetime.now(timezone.utc)
+    for publication in previous:
+        if publication.message_id != new_message_id:
+            publication.deleted_at = now
+    order.pinned_message_id = new_message_id
+    order.awaiting_middle_pin = False
+    if replacing_existing:
+        order.pin_changes_used += 1
+    order.updated_at = now
+    session.add(
+        Publication(
+            order_id=order.id,
+            chat_id=settings.bazaar_chat_id,
+            message_id=new_message_id,
+            kind=PublicationKind.MIDDLE_PIN.value,
+            created_at=now,
+            deleted_at=None,
+        )
+    )
+    await session.delete(candidate)
+    await session.commit()
 
 
 async def capture_middle_pin(
@@ -172,37 +316,15 @@ async def capture_middle_pin(
     order: AdOrder,
     message: Message,
 ) -> None:
-    settings = get_settings()
-    replacing_existing = bool(order.pinned_message_id)
-    old_message_id = order.pinned_message_id
-
-    await bot.pin_chat_message(
-        settings.bazaar_chat_id,
-        message.message_id,
-        disable_notification=True,
+    """Compatibility wrapper for older callers."""
+    candidate = MiddlePinCandidate(
+        order_id=order.id,
+        chat_id=message.chat.id,
+        message_id=message.message_id,
+        preview_text=(message.caption or message.text or "")[:255],
+        created_at=datetime.now(timezone.utc),
     )
-    if old_message_id and old_message_id != message.message_id:
-        try:
-            await bot.unpin_chat_message(settings.bazaar_chat_id, old_message_id)
-        except Exception:
-            pass
-
-    order.pinned_message_id = message.message_id
-    order.awaiting_middle_pin = False
-    if replacing_existing:
-        order.pin_changes_used += 1
-    order.updated_at = datetime.now(timezone.utc)
-    session.add(
-        Publication(
-            order_id=order.id,
-            chat_id=settings.bazaar_chat_id,
-            message_id=message.message_id,
-            kind=PublicationKind.MIDDLE_PIN.value,
-            created_at=datetime.now(timezone.utc),
-            deleted_at=None,
-        )
-    )
-    await session.commit()
+    await confirm_middle_pin(session, bot, order, candidate)
 
 
 async def finish_order(
@@ -216,11 +338,14 @@ async def finish_order(
     if order.pinned_message_id:
         try:
             await bot.unpin_chat_message(
-                settings.bazaar_chat_id,
-                order.pinned_message_id,
+                chat_id=settings.bazaar_chat_id,
+                message_id=order.pinned_message_id,
             )
         except Exception:
             pass
+    candidate = await session.get(MiddlePinCandidate, order.id)
+    if candidate:
+        await session.delete(candidate)
     order.status = status
     order.awaiting_middle_pin = False
     order.next_publish_at = None
@@ -238,17 +363,7 @@ async def publish_best_copy(
     settings = get_settings()
     now = datetime.now(timezone.utc)
     messages = await send_ad_content(bot, settings.bazaar_chat_id, order)
-    for message in messages:
-        session.add(
-            Publication(
-                order_id=order.id,
-                chat_id=settings.bazaar_chat_id,
-                message_id=message.message_id,
-                kind=PublicationKind.COPY.value,
-                created_at=now,
-                deleted_at=None,
-            )
-        )
+    await _record_publications(session, order, messages, PublicationKind.COPY.value)
     order.next_publish_at = now + timedelta(hours=3)
     await session.flush()
 
@@ -268,10 +383,7 @@ async def publish_best_copy(
     for publication in copies:
         if (
             not grouped
-            or abs(
-                (grouped[-1][0].created_at - publication.created_at).total_seconds()
-            )
-            > 2
+            or abs((grouped[-1][0].created_at - publication.created_at).total_seconds()) > 2
         ):
             grouped.append([publication])
         else:
