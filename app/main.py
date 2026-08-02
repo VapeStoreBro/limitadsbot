@@ -9,7 +9,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 
 from app.config import get_settings
 from app.db.bootstrap import bootstrap_database
-from app.handlers import router
+from app.handlers import admin, common, customer, moderation
 from app.services.scheduler import OrderScheduler
 
 logging.basicConfig(level=logging.INFO)
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
-dp.include_router(router)
+dp.include_routers(common.router, customer.router, moderation.router, admin.router)
 scheduler = OrderScheduler(bot)
 
 
