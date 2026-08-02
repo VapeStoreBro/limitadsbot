@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from aiogram import Bot, F, Router
@@ -5,10 +6,9 @@ from aiogram.enums import ChatType
 from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyKeyboardRemove
 
-from app.config import get_settings
 from app.db.session import SessionFactory
-from app.handlers.common import show_profile
 from app.models import User, UserScreen
+from app.services.ui_screen import delete_user_input, register_user_screen
 from app.services.users import upsert_user
 
 logger = logging.getLogger(__name__)
@@ -26,34 +26,55 @@ def owner_menu() -> InlineKeyboardMarkup:
     )
 
 
+async def _delete_later(message: Message) -> None:
+    await asyncio.sleep(1)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
 async def emergency_owner_menu(message: Message, bot: Bot) -> None:
+    """Open a guaranteed plain-text owner menu without membership or image UI."""
     if not message.from_user or message.from_user.id != OWNER_ID:
         return
 
     async with SessionFactory() as session:
         user = await session.get(User, OWNER_ID)
         if user is None:
-            user = await upsert_user(session, bot, message.from_user)
-
-    try:
-        await show_profile(bot, message.chat.id, user, True, source_message=message)
-        return
-    except Exception:
-        logger.exception("Primary owner menu failed; using emergency text menu")
-
-    async with SessionFactory() as session:
+            await upsert_user(session, bot, message.from_user)
         stale = await session.get(UserScreen, OWNER_ID)
         if stale is not None:
             await session.delete(stale)
             await session.commit()
 
-    await bot.send_message(
+    try:
+        service = await bot.send_message(
+            OWNER_ID,
+            "Открываю меню…",
+            reply_markup=ReplyKeyboardRemove(),
+            disable_notification=True,
+        )
+        asyncio.create_task(_delete_later(service))
+    except Exception:
+        pass
+
+    menu_message = await bot.send_message(
         OWNER_ID,
         "<b>👤 ГЛАВНОЕ МЕНЮ ВЛАДЕЛЬЦА</b>\n\n"
         f"ID: <code>{OWNER_ID}</code>\n"
-        "Права владельца подтверждены. Открываю аварийное текстовое меню.",
+        "Права владельца подтверждены.",
         reply_markup=owner_menu(),
     )
+    async with SessionFactory() as session:
+        await register_user_screen(
+            session,
+            OWNER_ID,
+            OWNER_ID,
+            menu_message.message_id,
+            media_key="text:owner",
+        )
+    await delete_user_input(message)
 
 
 @router.message(
@@ -62,10 +83,6 @@ async def emergency_owner_menu(message: Message, bot: Bot) -> None:
     F.from_user.id == OWNER_ID,
 )
 async def owner_start(message: Message, bot: Bot) -> None:
-    try:
-        await message.answer("Открываю меню…", reply_markup=ReplyKeyboardRemove(), disable_notification=True)
-    except Exception:
-        pass
     await emergency_owner_menu(message, bot)
 
 
