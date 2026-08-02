@@ -7,10 +7,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.enums import OrderStatus
+from app.enums import OrderStatus, TariffCode
 from app.models import AdOrder, OrderNotice, UserBlock
 from app.rules import advertising_prefix
 from app.services.order_cards import update_buyer_card, update_staff_card
+from app.services.orders import find_next_available_slot, slot_available
 from app.services.telegram_ads import activate_order, finish_order, refresh_user_prefix
 
 settings = get_settings()
@@ -45,7 +46,7 @@ async def auto_activate_paid_order(
     bot: Bot,
     order: AdOrder,
 ) -> bool:
-    """Start immediately after moderation + full payment, or at booking time."""
+    """Start after moderation + full payment, while respecting tariff capacity."""
     now = datetime.now(timezone.utc)
     if await session.get(UserBlock, order.user_id):
         order.status = OrderStatus.CANCELLED.value
@@ -61,6 +62,28 @@ async def auto_activate_paid_order(
         return True
     if order.requested_start_at and order.requested_start_at > now:
         order.status = OrderStatus.BOOKED.value
+        order.updated_at = now
+        await session.commit()
+        await update_buyer_card(session, bot, order)
+        return False
+
+    available = await slot_available(
+        session,
+        order.tariff_code,
+        now,
+        now + timedelta(hours=order.duration_hours),
+        order.id,
+    )
+    if not available and order.tariff_code != TariffCode.STANDARD.value:
+        next_slot = await find_next_available_slot(
+            session,
+            order.tariff_code,
+            order.duration_hours,
+            now,
+        )
+        order.status = OrderStatus.BOOKED.value
+        order.requested_start_at = next_slot
+        order.requested_end_at = next_slot + timedelta(hours=order.duration_hours)
         order.updated_at = now
         await session.commit()
         await update_buyer_card(session, bot, order)
