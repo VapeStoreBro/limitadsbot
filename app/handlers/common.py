@@ -3,12 +3,14 @@ from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemove
 
 from app.config import get_settings
 from app.db.session import SessionFactory
 from app.keyboards import membership_keyboard, phone_keyboard, profile_keyboard
 from app.models import User
+from app.services.blocking import get_user_block
 from app.services.price_card import ensure_main_menu_card
 from app.services.users import inspect_membership, is_admin, upsert_user
 
@@ -16,23 +18,30 @@ router = Router(name="common")
 settings = get_settings()
 
 
-def profile_caption(user: User) -> str:
+def profile_caption(user: User, blocked_reason: str | None = None) -> str:
     full_name = " ".join(part for part in [user.first_name, user.last_name] if part).strip()
     username = f"@{escape(user.username)}" if user.username else "не указан"
     phone = escape(user.phone or "не указан")
+    access_line = (
+        f"Доступ: <b>🚫 ограничен</b>\nПричина: <i>{escape(blocked_reason)}</i>"
+        if blocked_reason
+        else "Доступ: <b>✅ подтверждён</b>"
+    )
     return (
-        "<b>👤 Профиль</b>\n\n"
+        "<b><u>👤 ГЛАВНОЕ МЕНЮ</u></b>\n\n"
         f"Имя: <b>{escape(full_name or 'Без имени')}</b>\n"
         f"Username: {username}\n"
         f"ID: <code>{user.id}</code>\n"
         f"Телефон: <code>{phone}</code>\n"
-        "Доступ: <b>✅ подтверждён</b>"
+        f"{access_line}"
     )
 
 
 async def show_profile(bot: Bot, chat_id: int, user: User, admin: bool) -> None:
-    caption = profile_caption(user)
-    keyboard = profile_keyboard(admin)
+    async with SessionFactory() as session:
+        block = await get_user_block(session, user.id)
+    caption = profile_caption(user, block.reason if block else None)
+    keyboard = profile_keyboard(admin, blocked=bool(block and not admin))
     menu_image = ensure_main_menu_card()
     if menu_image:
         await bot.send_photo(
@@ -66,20 +75,23 @@ async def show_access_result(bot: Bot, chat_id: int, user: User, admin: bool) ->
     elif result == "not_member":
         await bot.send_message(
             chat_id,
-            "❌ Для покупки рекламы нужно вступить в группу.",
+            "<b>❌ Для покупки рекламы нужно вступить в группу</b>",
             reply_markup=membership_keyboard(settings.bazaar_url),
         )
     else:
         await bot.send_message(
             chat_id,
-            "⚠️ Не удалось проверить участие. Нажмите кнопку ещё раз.",
+            "<b>⚠️ Не удалось проверить участие</b>\n\nНажмите «Проверить снова».",
             reply_markup=membership_keyboard(settings.bazaar_url),
         )
         if error:
-            await bot.send_message(
-                settings.staff_chat_id,
-                f"⚠️ Ошибка проверки участника <code>{user.id}</code>:\n<code>{escape(error)}</code>",
-            )
+            try:
+                await bot.send_message(
+                    settings.owner_id,
+                    f"⚠️ Ошибка проверки участника <code>{user.id}</code>:\n<code>{escape(error)}</code>",
+                )
+            except Exception:
+                pass
 
 
 @router.message(CommandStart())
@@ -133,19 +145,39 @@ async def recheck_membership(callback: CallbackQuery, bot: Bot) -> None:
         user = await session.get(User, callback.from_user.id)
         admin = await is_admin(session, callback.from_user.id)
     if not user:
-        await callback.answer("Нажмите /start", show_alert=True)
+        await callback.answer("Откройте бота заново.", show_alert=True)
         return
     await callback.answer("Проверяю…")
     await show_access_result(bot, callback.from_user.id, user, admin)
 
 
-@router.callback_query(F.data == "profile:home")
-async def return_profile(callback: CallbackQuery, bot: Bot) -> None:
+@router.callback_query(F.data.in_({"profile:home", "nav:home", "order:cancel"}))
+async def return_profile(
+    callback: CallbackQuery,
+    bot: Bot,
+    state: FSMContext,
+) -> None:
+    await state.clear()
     async with SessionFactory() as session:
         user = await session.get(User, callback.from_user.id)
         admin = await is_admin(session, callback.from_user.id)
     if not user:
-        await callback.answer("Нажмите /start", show_alert=True)
+        await callback.answer("Откройте бота заново.", show_alert=True)
         return
-    await callback.answer()
+    await callback.answer("Главное меню")
+    await bot.send_message(
+        callback.from_user.id,
+        "Действие отменено. Возвращаю в главное меню.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
     await show_profile(bot, callback.from_user.id, user, admin)
+
+
+@router.callback_query(F.data == "blocked:info")
+async def blocked_info(callback: CallbackQuery) -> None:
+    async with SessionFactory() as session:
+        block = await get_user_block(session, callback.from_user.id)
+    await callback.answer(
+        block.reason if block else "Доступ уже восстановлен.",
+        show_alert=True,
+    )

@@ -17,6 +17,7 @@ from app.keyboards import (
     order_confirmation_keyboard,
     tariff_selection_keyboard,
 )
+from app.services.access import ensure_buyer_access
 from app.services.orders import (
     find_next_available_slot,
     get_price,
@@ -60,9 +61,7 @@ def selection_caption(selected: str | None = None) -> str:
 
 @router.callback_query(F.data == "profile:buy")
 async def open_price_v2(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    from app.handlers.customer import access_allowed
-
-    allowed, _ = await access_allowed(callback.from_user.id, bot)
+    allowed, _ = await ensure_buyer_access(callback.from_user.id, bot)
     if not allowed:
         await callback.answer()
         return
@@ -161,8 +160,16 @@ async def select_duration_v2(callback: CallbackQuery, state: FSMContext) -> None
 async def back_to_tariffs_v2(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(OrderFlow.choosing_tariff)
-    await callback.message.edit_caption(
-        caption=selection_caption(),
-        reply_markup=tariff_selection_keyboard(),
-    )
+    try:
+        await callback.message.edit_caption(
+            caption=selection_caption(),
+            reply_markup=tariff_selection_keyboard(),
+        )
+    except Exception:
+        await callback.bot.send_photo(
+            callback.from_user.id,
+            FSInputFile(ensure_price_card()),
+            caption=selection_caption(),
+            reply_markup=tariff_selection_keyboard(),
+        )
     await callback.answer("Выберите тариф")

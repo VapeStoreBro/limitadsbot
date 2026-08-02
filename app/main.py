@@ -11,9 +11,12 @@ from app.config import get_settings
 from app.db.bootstrap import bootstrap_database
 from app.handlers import (
     admin,
+    admin_orders_v4,
+    admin_pages_v4,
     admin_panel_v3,
     best_buttons_v3,
     buyer_ads_v3,
+    client_controls_v4,
     common,
     customer,
     entry_v3,
@@ -32,19 +35,21 @@ settings = get_settings()
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# New focused routers run before legacy compatibility handlers. This keeps the
-# compact buyer launcher, guided Best buttons, buyer ad controls and private
-# admin controls authoritative without breaking older orders already in DB.
+# Guards run before order/payment handlers so a blocked customer cannot finish
+# an old flow, pay a cancelled order or activate an already paid placement.
 dp.include_routers(
     entry_v3.router,
     common.router,
+    client_controls_v4.router,
     order_selection_v2.router,
     order_flow_v2.router,
     best_buttons_v3.router,
     payments_v3.router,
     buyer_ads_v3.router,
     moderation.router,
+    admin_orders_v4.router,
     order_admin_v2.router,
+    admin_pages_v4.router,
     admin_panel_v3.router,
     customer.router,
     admin.router,

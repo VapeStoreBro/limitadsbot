@@ -5,7 +5,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.db.session import SessionFactory, engine
 from app.enums import DurationCode, TariffCode
-from app.models import Admin, Base, TariffPrice, User
+from app.models import Admin, AppSetting, Base, TariffPrice, User
 
 DEFAULT_PRICES = {
     (TariffCode.STANDARD, DurationCode.DAY): (500, 24),
@@ -18,6 +18,10 @@ DEFAULT_PRICES = {
     (TariffCode.BEST, DurationCode.WEEK): (2000, 24 * 7),
     (TariffCode.BEST, DurationCode.MONTH): (2700, 24 * 30),
 }
+
+STAFF_CHAT_KEY = "staff_chat_id"
+OLD_STAFF_CHAT_IDS = {"-5466156820"}
+CORRECT_STAFF_CHAT_ID = "-1003791561734"
 
 
 async def bootstrap_database() -> None:
@@ -46,17 +50,44 @@ async def bootstrap_database() -> None:
             session.add(owner)
             await session.flush()
         if await session.get(Admin, settings.owner_id) is None:
-            session.add(Admin(user_id=settings.owner_id, role="owner", added_by=settings.owner_id, added_at=now))
+            session.add(
+                Admin(
+                    user_id=settings.owner_id,
+                    role="owner",
+                    added_by=settings.owner_id,
+                    added_at=now,
+                )
+            )
+
+        staff_setting = await session.get(AppSetting, STAFF_CHAT_KEY)
+        if staff_setting is None:
+            session.add(
+                AppSetting(
+                    key=STAFF_CHAT_KEY,
+                    value=CORRECT_STAFF_CHAT_ID,
+                    updated_by=settings.owner_id,
+                    updated_at=now,
+                )
+            )
+        elif staff_setting.value in OLD_STAFF_CHAT_IDS:
+            staff_setting.value = CORRECT_STAFF_CHAT_ID
+            staff_setting.updated_by = settings.owner_id
+            staff_setting.updated_at = now
+
         for (tariff, duration), (price, hours) in DEFAULT_PRICES.items():
-            row = await session.scalar(select(TariffPrice).where(
-                TariffPrice.tariff_code == tariff.value,
-                TariffPrice.duration_code == duration.value,
-            ))
+            row = await session.scalar(
+                select(TariffPrice).where(
+                    TariffPrice.tariff_code == tariff.value,
+                    TariffPrice.duration_code == duration.value,
+                )
+            )
             if row is None:
-                session.add(TariffPrice(
-                    tariff_code=tariff.value,
-                    duration_code=duration.value,
-                    price_rub=price,
-                    duration_hours=hours,
-                ))
+                session.add(
+                    TariffPrice(
+                        tariff_code=tariff.value,
+                        duration_code=duration.value,
+                        price_rub=price,
+                        duration_hours=hours,
+                    )
+                )
         await session.commit()
